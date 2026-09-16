@@ -242,3 +242,170 @@ func TestAccountAllowOverageMigration(t *testing.T) {
 		}
 	}
 }
+
+// --- region switching (pinned profile ARN) ---
+
+const (
+	testUSProfileArn = "arn:aws:codewhisperer:us-east-1:123456789012:profile/ABCDEFGHIJ"
+	testEUProfileArn = "arn:aws:codewhisperer:eu-central-1:123456789012:profile/KLMNOPQRST"
+)
+
+func TestPinAccountProfileArnSetsAndClearsPin(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:         "acc-1",
+		AuthMethod: "social",
+		Region:     "us-east-1",
+		ProfileArn: testUSProfileArn,
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	if err := PinAccountProfileArn("acc-1", testEUProfileArn); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	got := GetAccounts()[0]
+	if got.ProfileArn != testEUProfileArn || !got.ProfileArnPinned {
+		t.Fatalf("after pin: arn=%q pinned=%v", got.ProfileArn, got.ProfileArnPinned)
+	}
+
+	// Clearing the pin re-enables automatic discovery.
+	if err := PinAccountProfileArn("acc-1", ""); err != nil {
+		t.Fatalf("clear pin: %v", err)
+	}
+	got = GetAccounts()[0]
+	if got.ProfileArn != "" || got.ProfileArnPinned {
+		t.Fatalf("after clear: arn=%q pinned=%v", got.ProfileArn, got.ProfileArnPinned)
+	}
+}
+
+func TestPinAccountProfileArnMissingAccount(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := PinAccountProfileArn("nope", testEUProfileArn); err != ErrAccountNotFound {
+		t.Fatalf("expected ErrAccountNotFound, got %v", err)
+	}
+}
+
+// A pinned region must survive a token refresh that reports the account's
+// home-region profile, otherwise the switch silently reverts.
+func TestUpdateAccountCredentialStateKeepsPinnedProfileArn(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:           "acc-1",
+		AuthMethod:   "social",
+		RefreshToken: "rt-1",
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := PinAccountProfileArn("acc-1", testEUProfileArn); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	if err := UpdateAccountCredentialState("acc-1", "at-2", "rt-2", 111, testUSProfileArn); err != nil {
+		t.Fatalf("update credential state: %v", err)
+	}
+
+	got := GetAccounts()[0]
+	if got.ProfileArn != testEUProfileArn {
+		t.Fatalf("pinned ARN was overwritten by refresh: %q", got.ProfileArn)
+	}
+	// The credential fields themselves must still be applied.
+	if got.AccessToken != "at-2" || got.RefreshToken != "rt-2" || got.ExpiresAt != 111 {
+		t.Fatalf("credential fields not updated: %+v", got)
+	}
+}
+
+func TestUpdateAccountCredentialStateAppliesProfileArnWhenNotPinned(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:           "acc-1",
+		AuthMethod:   "social",
+		RefreshToken: "rt-1",
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := UpdateAccountCredentialState("acc-1", "at-2", "rt-2", 111, testUSProfileArn); err != nil {
+		t.Fatalf("update credential state: %v", err)
+	}
+	if got := GetAccounts()[0]; got.ProfileArn != testUSProfileArn {
+		t.Fatalf("unpinned ARN should follow refresh, got %q", got.ProfileArn)
+	}
+}
+
+func TestUpdateAccountProfileArnDoesNotOverwritePin(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{ID: "acc-1", AuthMethod: "social", Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := PinAccountProfileArn("acc-1", testEUProfileArn); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	// Automatic discovery caching must be a no-op while pinned.
+	if err := UpdateAccountProfileArn("acc-1", testUSProfileArn); err != nil {
+		t.Fatalf("discovery cache: %v", err)
+	}
+	if got := GetAccounts()[0]; got.ProfileArn != testEUProfileArn {
+		t.Fatalf("discovery overwrote pinned ARN: %q", got.ProfileArn)
+	}
+}
+
+// UpdateAccount is the admin/status write path; it must not drop the pin flag.
+func TestUpdateAccountPreservesProfileArnPin(t *testing.T) {
+	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{ID: "acc-1", AuthMethod: "social", Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := PinAccountProfileArn("acc-1", testEUProfileArn); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+
+	stale := GetAccounts()[0]
+	stale.ProfileArn = testUSProfileArn
+	stale.ProfileArnPinned = false
+	stale.Nickname = "renamed"
+	if err := UpdateAccount("acc-1", stale); err != nil {
+		t.Fatalf("update account: %v", err)
+	}
+
+	got := GetAccounts()[0]
+	if got.Nickname != "renamed" {
+		t.Fatalf("nickname not applied: %q", got.Nickname)
+	}
+	if got.ProfileArn != testEUProfileArn || !got.ProfileArnPinned {
+		t.Fatalf("pin not preserved: arn=%q pinned=%v", got.ProfileArn, got.ProfileArnPinned)
+	}
+}
+
+func TestPinnedProfileArnSurvivesReload(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(path); err != nil {
+		t.Fatalf("init config: %v", err)
+	}
+	if err := AddAccount(Account{ID: "acc-1", AuthMethod: "social", Enabled: true}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	if err := PinAccountProfileArn("acc-1", testEUProfileArn); err != nil {
+		t.Fatalf("pin: %v", err)
+	}
+	if err := Init(path); err != nil {
+		t.Fatalf("re-init config: %v", err)
+	}
+	if got := GetAccounts()[0]; got.ProfileArn != testEUProfileArn || !got.ProfileArnPinned {
+		t.Fatalf("pin lost across reload: arn=%q pinned=%v", got.ProfileArn, got.ProfileArnPinned)
+	}
+}

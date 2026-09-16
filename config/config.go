@@ -72,6 +72,13 @@ type Account struct {
 	MachineId    string `json:"machineId,omitempty"`    // UUID machine identifier for request tracking
 	ProfileArn   string `json:"profileArn,omitempty"`   // CodeWhisperer/Kiro profile ARN for generation requests
 
+	// ProfileArnPinned marks ProfileArn as an explicit operator choice made
+	// through the admin panel. Automatic sources (ListAvailableProfiles
+	// discovery and the profileArn returned by a refresh-token exchange) must
+	// not overwrite a pinned ARN, otherwise the account silently drifts back
+	// to whichever data-plane region upstream reports first.
+	ProfileArnPinned bool `json:"profileArnPinned,omitempty"`
+
 	// Microsoft Enterprise SSO uses an external OAuth2 public client. These
 	// fields are deliberately separate from the AWS IdC client secret/region:
 	// Account.Region remains the AWS authentication region, while data-plane
@@ -698,6 +705,7 @@ func UpdateAccount(id string, account Account) error {
 			account.StartUrl = a.StartUrl
 			account.ExpiresAt = a.ExpiresAt
 			account.ProfileArn = a.ProfileArn
+			account.ProfileArnPinned = a.ProfileArnPinned
 			account.TokenEndpoint = a.TokenEndpoint
 			account.IssuerURL = a.IssuerURL
 			account.Scopes = a.Scopes
@@ -810,11 +818,16 @@ func ClearAccountBanStatus(id string) error {
 	return nil
 }
 
+// UpdateAccountProfileArn caches an automatically discovered profile ARN.
+// A pinned ARN is left untouched so operator region choices survive discovery.
 func UpdateAccountProfileArn(id, profileArn string) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
 		if a.ID == id {
+			if cfg.Accounts[i].ProfileArnPinned {
+				return nil
+			}
 			previous := cfg.Accounts[i].ProfileArn
 			cfg.Accounts[i].ProfileArn = profileArn
 			if err := Save(); err != nil {
@@ -825,6 +838,28 @@ func UpdateAccountProfileArn(id, profileArn string) error {
 		}
 	}
 	return nil
+}
+
+// PinAccountProfileArn records an explicit operator profile choice. The ARN is
+// validated by the caller (proxy layer owns the ARN grammar); an empty ARN
+// clears the pin and lets automatic discovery resume.
+func PinAccountProfileArn(id, profileArn string) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, a := range cfg.Accounts {
+		if a.ID == id {
+			previous := cfg.Accounts[i]
+			profileArn = strings.TrimSpace(profileArn)
+			cfg.Accounts[i].ProfileArn = profileArn
+			cfg.Accounts[i].ProfileArnPinned = profileArn != ""
+			if err := Save(); err != nil {
+				cfg.Accounts[i] = previous
+				return err
+			}
+			return nil
+		}
+	}
+	return ErrAccountNotFound
 }
 
 func DeleteAccount(id string) error {
@@ -867,7 +902,10 @@ func UpdateAccountCredentialState(
 				cfg.Accounts[i].RefreshToken = refreshToken
 			}
 			cfg.Accounts[i].ExpiresAt = expiresAt
-			if profileArn != "" {
+			// A manually pinned profile ARN is authoritative. Upstream refresh
+			// responses report the account's home-region profile, which would
+			// otherwise silently revert a user's region switch.
+			if profileArn != "" && !cfg.Accounts[i].ProfileArnPinned {
 				cfg.Accounts[i].ProfileArn = profileArn
 			}
 			if err := Save(); err != nil {
