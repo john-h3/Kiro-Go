@@ -2,8 +2,10 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -408,4 +410,56 @@ func TestPinnedProfileArnSurvivesReload(t *testing.T) {
 	if got := GetAccounts()[0]; got.ProfileArn != testEUProfileArn || !got.ProfileArnPinned {
 		t.Fatalf("pin lost across reload: arn=%q pinned=%v", got.ProfileArn, got.ProfileArnPinned)
 	}
+}
+
+// TestInitConcurrentWithBackgroundSaveIsRaceFree reproduces the reported data
+// race: Init() installs a new configuration path while a persist spawned
+// earlier is still running. The pool triggers those persists in a goroutine
+// (go config.UpdateAccountStats(...)), so a Save() can legitimately overlap the
+// next Init(). Run with -race; without the atomic path this fails.
+func TestInitConcurrentWithBackgroundSaveIsRaceFree(t *testing.T) {
+	dir := t.TempDir()
+	if err := Init(filepath.Join(dir, "config-0.json")); err != nil {
+		t.Fatalf("initial Init: %v", err)
+	}
+	if err := AddAccount(Account{
+		ID:         "race-1",
+		Email:      "race@example.com",
+		AuthMethod: "idc",
+		Enabled:    true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+
+	// Writer: repeatedly reinstall the config path, as Init() does.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		for i := 0; i < 200; i++ {
+			if err := Init(filepath.Join(dir, fmt.Sprintf("config-%d.json", i))); err != nil {
+				t.Errorf("Init: %v", err)
+				return
+			}
+		}
+	}()
+
+	// Reader: background persists that read the path inside Save().
+	for w := 0; w < 4; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			for i := 0; i < 200; i++ {
+				UpdateAccountStats("race-1", i, 0, i*10, float64(i), int64(i))
+				GetConfigDir()
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
 }

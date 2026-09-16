@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -271,13 +272,23 @@ const Version = "1.1.5"
 var (
 	cfg     *Config
 	cfgLock sync.RWMutex
-	cfgPath string
+	// cfgPath is read by Save(), which is called both with and without cfgLock
+	// held, so it cannot be guarded by cfgLock without self-deadlocking. It is
+	// atomic instead: a background persist spawned by an earlier request can
+	// still be running while Init() installs a new path.
+	cfgPath atomic.Value
 )
+
+// configPath returns the active configuration file path.
+func configPath() string {
+	path, _ := cfgPath.Load().(string)
+	return path
+}
 
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
-	cfgPath = path
+	cfgPath.Store(path)
 	return Load()
 }
 
@@ -285,7 +296,7 @@ func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 
-	data, err := os.ReadFile(cfgPath)
+	data, err := os.ReadFile(configPath())
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Create default configuration.
@@ -372,7 +383,7 @@ func Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(cfgPath, data, 0600)
+	return os.WriteFile(configPath(), data, 0600)
 }
 
 // SetPassword updates the admin password.
@@ -389,10 +400,11 @@ func SetPassword(password string) {
 func GetConfigDir() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	if cfgPath == "" {
+	path := configPath()
+	if path == "" {
 		return "."
 	}
-	dir := cfgPath
+	dir := path
 	for i := len(dir) - 1; i >= 0; i-- {
 		if dir[i] == '/' || dir[i] == '\\' {
 			return dir[:i]
