@@ -20,7 +20,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -136,64 +135,12 @@ type Account struct {
 	TrialStatus       string  `json:"trialStatus,omitempty"`       // Trial status: ACTIVE, EXPIRED, NONE
 	TrialExpiresAt    int64   `json:"trialExpiresAt,omitempty"`    // Trial expiration timestamp (Unix seconds)
 
-	// Runtime statistics (updated during operation).
-	// These remain the account-wide totals across every data-plane region.
+	// Runtime statistics (updated during operation)
 	RequestCount int     `json:"requestCount,omitempty"` // Total requests processed
 	ErrorCount   int     `json:"errorCount,omitempty"`   // Total errors encountered
 	LastUsed     int64   `json:"lastUsed,omitempty"`     // Last request timestamp
 	TotalTokens  int     `json:"totalTokens,omitempty"`  // Cumulative tokens processed
 	TotalCredits float64 `json:"totalCredits,omitempty"` // Cumulative credits consumed
-
-	// StatsByRegion breaks the same counters down per Kiro data-plane region,
-	// keyed by region (for example "us-east-1"). An account can hold separate
-	// subscriptions and quotas in each region, so a single shared total hides
-	// which region actually consumed the credits. The totals above stay
-	// authoritative; this map is an additional breakdown whose values sum to
-	// them for any traffic recorded after the upgrade.
-	StatsByRegion map[string]RegionStats `json:"statsByRegion,omitempty"`
-}
-
-// RegionStats holds one account's usage counters for a single data-plane region.
-type RegionStats struct {
-	RequestCount int     `json:"requestCount,omitempty"`
-	TotalTokens  int     `json:"totalTokens,omitempty"`
-	TotalCredits float64 `json:"totalCredits,omitempty"`
-	LastUsed     int64   `json:"lastUsed,omitempty"`
-}
-
-// LegacyStatsRegion is the data-plane region that pre-existing account totals
-// are attributed to on first load. Region-aware accounting was introduced after
-// these counters had been accumulating, and all traffic until then was served
-// by us-east-1.
-const LegacyStatsRegion = "us-east-1"
-
-// AccumulateRegionStats returns a new map with one request folded into the
-// bucket for region. The input map is never mutated: the account pool holds one
-// entry per weight unit and hands out shallow copies, so a shared map mutated in
-// place would be observable through those copies. An empty region is a no-op and
-// the original map is returned unchanged.
-func AccumulateRegionStats(
-	current map[string]RegionStats,
-	region string,
-	tokens int,
-	credits float64,
-	lastUsed int64,
-) map[string]RegionStats {
-	region = strings.TrimSpace(region)
-	if region == "" {
-		return current
-	}
-	next := make(map[string]RegionStats, len(current)+1)
-	for key, value := range current {
-		next[key] = value
-	}
-	bucket := next[region]
-	bucket.RequestCount++
-	bucket.TotalTokens += tokens
-	bucket.TotalCredits += credits
-	bucket.LastUsed = lastUsed
-	next[region] = bucket
-	return next
 }
 
 // PromptFilterRule defines a single custom prompt sanitization rule.
@@ -324,23 +271,13 @@ const Version = "1.1.5"
 var (
 	cfg     *Config
 	cfgLock sync.RWMutex
-	// cfgPath is read by Save(), which is called both with and without cfgLock
-	// held, so it cannot be guarded by cfgLock without self-deadlocking. It is
-	// atomic instead: Init() can run while a previously spawned background
-	// persist is still finishing.
-	cfgPath atomic.Value
+	cfgPath string
 )
-
-// configPath returns the active configuration file path.
-func configPath() string {
-	path, _ := cfgPath.Load().(string)
-	return path
-}
 
 // Init initializes the configuration system with the specified file path.
 // If the file doesn't exist, a default configuration is created.
 func Init(path string) error {
-	cfgPath.Store(path)
+	cfgPath = path
 	return Load()
 }
 
@@ -348,7 +285,7 @@ func Load() error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 
-	data, err := os.ReadFile(configPath())
+	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			// Create default configuration.
@@ -413,37 +350,6 @@ func Load() error {
 			return err
 		}
 	}
-
-	// Migration: seed per-region stats from the pre-existing account totals.
-	// Region-aware accounting was added after these counters had already been
-	// accumulating, and every request before that point was served by the
-	// us-east-1 data plane, so the existing totals are attributed there. Only
-	// accounts that carry usage but no breakdown yet are touched, which keeps
-	// this a one-time backfill.
-	regionStatsMigrated := false
-	for i := range cfg.Accounts {
-		account := &cfg.Accounts[i]
-		if len(account.StatsByRegion) != 0 {
-			continue
-		}
-		if account.RequestCount == 0 && account.TotalTokens == 0 && account.TotalCredits == 0 {
-			continue
-		}
-		account.StatsByRegion = map[string]RegionStats{
-			LegacyStatsRegion: {
-				RequestCount: account.RequestCount,
-				TotalTokens:  account.TotalTokens,
-				TotalCredits: account.TotalCredits,
-				LastUsed:     account.LastUsed,
-			},
-		}
-		regionStatsMigrated = true
-	}
-	if regionStatsMigrated {
-		if err := saveLocked(); err != nil {
-			return err
-		}
-	}
 	return nil
 }
 
@@ -466,7 +372,7 @@ func Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath(), data, 0600)
+	return os.WriteFile(cfgPath, data, 0600)
 }
 
 // SetPassword updates the admin password.
@@ -483,11 +389,10 @@ func SetPassword(password string) {
 func GetConfigDir() string {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
-	path := configPath()
-	if path == "" {
+	if cfgPath == "" {
 		return "."
 	}
-	dir := path
+	dir := cfgPath
 	for i := len(dir) - 1; i >= 0; i-- {
 		if dir[i] == '/' || dir[i] == '\\' {
 			return dir[:i]
@@ -1068,17 +973,7 @@ func GetStats() (int, int, int, int, float64) {
 	return cfg.TotalRequests, cfg.SuccessRequests, cfg.FailedRequests, cfg.TotalTokens, cfg.TotalCredits
 }
 
-// UpdateAccountStats persists one account's counters. statsByRegion is the
-// caller's already-accumulated per-region breakdown, so the pool stays the
-// single owner of the arithmetic. The map is cloned so the two packages never
-// share mutable state; a nil map leaves the stored breakdown untouched.
-func UpdateAccountStats(
-	id string,
-	requestCount, errorCount, totalTokens int,
-	totalCredits float64,
-	lastUsed int64,
-	statsByRegion map[string]RegionStats,
-) error {
+func UpdateAccountStats(id string, requestCount, errorCount, totalTokens int, totalCredits float64, lastUsed int64) error {
 	cfgLock.Lock()
 	defer cfgLock.Unlock()
 	for i, a := range cfg.Accounts {
@@ -1088,13 +983,6 @@ func UpdateAccountStats(
 			cfg.Accounts[i].TotalTokens = totalTokens
 			cfg.Accounts[i].TotalCredits = totalCredits
 			cfg.Accounts[i].LastUsed = lastUsed
-			if len(statsByRegion) != 0 {
-				cloned := make(map[string]RegionStats, len(statsByRegion))
-				for region, stats := range statsByRegion {
-					cloned[region] = stats
-				}
-				cfg.Accounts[i].StatsByRegion = cloned
-			}
 			return Save()
 		}
 	}

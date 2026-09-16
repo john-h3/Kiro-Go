@@ -1284,9 +1284,7 @@
       detailItem(t('detail.errorCount'), a.errorCount || 0) +
       detailItem(t('detail.totalTokens'), formatNum(a.totalTokens || 0)) +
       detailItem(t('detail.totalCredits'), (a.totalCredits || 0).toFixed(2)) +
-      '</div>' +
-      renderRegionStats(a) +
-      '</div>' +
+      '</div></div>' +
 
       '<div class="detail-section">' +
       '<h4>' + escapeHtml(t('detail.models')) +
@@ -1375,33 +1373,6 @@
   // their imported region and own no Kiro profile ARN.
   function supportsRegionSwitch(a) {
     return (a.authMethod || '').toLowerCase() !== 'api_key';
-  }
-  // Per-region usage breakdown. Each data-plane region carries its own upstream
-  // subscription and quota, so the shared totals above cannot tell you which
-  // region actually consumed the credits.
-  function renderRegionStats(a) {
-    const rows = a.statsByRegion || [];
-    if (!rows.length) return '';
-    const active = a.activeRegion || a.region || '';
-    return '<h4 class="detail-subhead">' + escapeHtml(t('detail.statsByRegion')) + '</h4>' +
-      '<p class="help-block">' + escapeHtml(t('detail.statsByRegionHint')) + '</p>' +
-      '<div class="model-list">' +
-      rows.map(r =>
-        '<div class="model-item">' +
-        '<span>' + escapeHtml(r.region || '-') +
-        (r.region && r.region === active
-          ? ' <span class="badge badge-success">' + escapeHtml(t('detail.regionCurrent')) + '</span>'
-          : '') +
-        '</span>' +
-        '<span>' +
-        escapeHtml(t('detail.statsRegionLine',
-          r.requestCount || 0,
-          formatNum(r.totalTokens || 0),
-          (r.totalCredits || 0).toFixed(2))) +
-        '</span>' +
-        '</div>'
-      ).join('') +
-      '</div>';
   }
   function renderRegionSection(a, idAttr) {
     if (!supportsRegionSwitch(a)) return '';
