@@ -3,6 +3,7 @@ package proxy
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"kiro-go/config"
 	accountpool "kiro-go/pool"
 	"net/http"
@@ -306,5 +307,139 @@ func TestPinnedRegionSurvivesRefreshReportedProfileArn(t *testing.T) {
 	}
 	if stored.AccessToken != "at-rotated" {
 		t.Fatalf("token rotation was lost: %q", stored.AccessToken)
+	}
+}
+
+// TestListProfilesSendsBodyUpstreamAccepts locks the request shape that the
+// real ListAvailableProfiles API accepts. The endpoint rejects any unexpected
+// member with HTTP 400 REQUEST_BODY_INVALID, so the first page must be a bare
+// {} and a continuation must carry only a non-empty nextToken. Sending
+// maxResults made profile discovery fail against every live region.
+func TestListProfilesSendsBodyUpstreamAccepts(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+
+	var bodies []map[string]interface{}
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: handlerMicrosoftRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			raw, _ := io.ReadAll(request.Body)
+			var decoded map[string]interface{}
+			if err := json.Unmarshal(raw, &decoded); err != nil {
+				t.Fatalf("request body is not JSON: %q", raw)
+			}
+			bodies = append(bodies, decoded)
+
+			if decoded["nextToken"] == "page-2" {
+				return handlerMicrosoftJSONResponse(request, http.StatusOK, map[string]interface{}{
+					"profiles": []map[string]string{{
+						"arn":         "arn:aws:codewhisperer:us-east-1:123456789012:profile/two",
+						"profileName": "Two",
+					}},
+				}), nil
+			}
+			return handlerMicrosoftJSONResponse(request, http.StatusOK, map[string]interface{}{
+				"profiles": []map[string]string{{
+					"arn":         "arn:aws:codewhisperer:us-east-1:123456789012:profile/one",
+					"profileName": "One",
+				}},
+				"nextToken": "page-2",
+			}), nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	profiles, err := listKiroProfilesInRegion(&config.Account{
+		AccessToken: "token",
+		AuthMethod:  "idc",
+		Region:      "us-east-1",
+	}, "us-east-1")
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(profiles) != 2 {
+		t.Fatalf("profiles = %d, want 2 across pages", len(profiles))
+	}
+	if len(bodies) != 2 {
+		t.Fatalf("request count = %d, want 2", len(bodies))
+	}
+
+	// First page: strictly empty. Any member here is a 400 upstream.
+	if len(bodies[0]) != 0 {
+		t.Fatalf("first page body = %v, want {}", bodies[0])
+	}
+	// Continuation: nextToken only.
+	if len(bodies[1]) != 1 || bodies[1]["nextToken"] != "page-2" {
+		t.Fatalf("second page body = %v, want only nextToken=page-2", bodies[1])
+	}
+	for i, body := range bodies {
+		if _, present := body["maxResults"]; present {
+			t.Fatalf("page %d sent maxResults, which upstream rejects: %v", i, body)
+		}
+	}
+}
+
+// TestRefreshAccountRepublishesUsageToPool covers the single-account refresh
+// endpoint. Switching region can move an account onto a data plane with its own
+// separate quota, so a refresh that brings it back under limit must make it
+// routable immediately instead of waiting for an unrelated pool write.
+func TestRefreshAccountRepublishesUsageToPool(t *testing.T) {
+	h := newRegionSwitchHandler(t)
+	const accountID = "quota-1"
+
+	// Persisted as over quota, which excludes it from the pool.
+	if err := config.AddAccount(config.Account{
+		ID:           accountID,
+		Email:        "quota@example.com",
+		AuthMethod:   "idc",
+		Region:       "us-east-1",
+		AccessToken:  "token",
+		RefreshToken: "refresh",
+		ProfileArn:   "arn:aws:codewhisperer:us-east-1:123456789012:profile/AAAAAAAAAA",
+		UsageCurrent: 10246,
+		UsageLimit:   10000,
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	h.pool.Reload()
+	if got := h.pool.AvailableCount(); got != 0 {
+		t.Fatalf("available before refresh = %d, want 0 (over quota)", got)
+	}
+
+	// The refreshed region reports usage under its own limit.
+	kiroRestHttpStore.Store(&http.Client{
+		Transport: handlerMicrosoftRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+			return handlerMicrosoftJSONResponse(request, http.StatusOK, map[string]interface{}{
+				"userInfo": map[string]string{
+					"email":  "quota@example.com",
+					"userId": "user-1",
+				},
+				"subscriptionInfo": map[string]string{
+					"subscriptionTitle": "KIRO PRO",
+					"type":              "Q_DEVELOPER_STANDALONE_PRO",
+				},
+				"usageBreakdownList": []map[string]interface{}{{
+					"resourceType": "CREDIT",
+					"currentUsage": 277,
+					"usageLimit":   1000,
+				}},
+			}), nil
+		}),
+	})
+	t.Cleanup(func() { InitKiroHttpClient("") })
+
+	recorder := httptest.NewRecorder()
+	h.apiRefreshAccount(
+		recorder,
+		httptest.NewRequest(http.MethodPost, "/accounts/"+accountID+"/refresh", nil),
+		accountID,
+	)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("refresh status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+
+	if got := h.pool.AvailableCount(); got != 1 {
+		t.Fatalf("available after refresh = %d, want 1; pool kept the stale over-quota snapshot", got)
 	}
 }

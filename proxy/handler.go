@@ -4280,6 +4280,12 @@ func (h *Handler) apiRefreshAccount(w http.ResponseWriter, r *http.Request, id s
 		return
 	}
 
+	// Republish the refreshed usage into the pool. Without this the pool keeps
+	// the pre-refresh snapshot, so an account that just came back under quota
+	// (for example after switching to a region with its own separate quota)
+	// stays excluded from routing until some other write reloads the pool.
+	h.pool.Reload()
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"success": true,
 		"info":    info,
