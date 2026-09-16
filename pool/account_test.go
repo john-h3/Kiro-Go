@@ -325,3 +325,102 @@ func TestReloadDropsOverQuotaAccountWhenAllowOverUsageDisabled(t *testing.T) {
 		t.Fatalf("expected over-quota account to be dropped, got %q", got.ID)
 	}
 }
+
+// TestUpdateStatsSplitsUsageByRegion covers the core of per-region accounting:
+// each data plane carries its own subscription and quota, so usage must land in
+// the region that served the request while the account-wide totals keep
+// aggregating everything.
+func TestUpdateStatsSplitsUsageByRegion(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	p := &AccountPool{}
+	p.accounts = []config.Account{{ID: "acct"}}
+
+	p.UpdateStats("acct", "us-east-1", 100, 1.5)
+	p.UpdateStats("acct", "eu-central-1", 40, 0.25)
+	p.UpdateStats("acct", "eu-central-1", 60, 0.75)
+
+	account := p.accounts[0]
+	if account.RequestCount != 3 || account.TotalTokens != 200 {
+		t.Fatalf("totals = %d requests / %d tokens, want 3 / 200",
+			account.RequestCount, account.TotalTokens)
+	}
+	if account.TotalCredits < 2.49 || account.TotalCredits > 2.51 {
+		t.Fatalf("total credits = %v, want 2.5", account.TotalCredits)
+	}
+
+	us := account.StatsByRegion["us-east-1"]
+	if us.RequestCount != 1 || us.TotalTokens != 100 {
+		t.Fatalf("us-east-1 bucket = %+v, want 1 request / 100 tokens", us)
+	}
+	eu := account.StatsByRegion["eu-central-1"]
+	if eu.RequestCount != 2 || eu.TotalTokens != 100 {
+		t.Fatalf("eu-central-1 bucket = %+v, want 2 requests / 100 tokens", eu)
+	}
+	if eu.TotalCredits < 0.99 || eu.TotalCredits > 1.01 {
+		t.Fatalf("eu-central-1 credits = %v, want 1.0", eu.TotalCredits)
+	}
+
+	// Buckets must sum back to the account totals.
+	sumRequests, sumTokens := 0, 0
+	for _, stats := range account.StatsByRegion {
+		sumRequests += stats.RequestCount
+		sumTokens += stats.TotalTokens
+	}
+	if sumRequests != account.RequestCount || sumTokens != account.TotalTokens {
+		t.Fatalf("buckets sum to %d/%d, totals are %d/%d",
+			sumRequests, sumTokens, account.RequestCount, account.TotalTokens)
+	}
+}
+
+// TestUpdateStatsDoesNotShareRegionMapAcrossSnapshots guards the copy-on-write
+// in UpdateStats. The pool stores one entry per weight unit and GetAllAccounts
+// returns shallow copies, so a shared map would let later writes mutate a
+// snapshot a caller is still reading.
+func TestUpdateStatsDoesNotShareRegionMapAcrossSnapshots(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	p := &AccountPool{}
+	// Weight 3 means three duplicate entries for the same account.
+	p.accounts = []config.Account{{ID: "acct"}, {ID: "acct"}, {ID: "acct"}}
+
+	p.UpdateStats("acct", "us-east-1", 10, 0.1)
+	snapshot := p.GetAllAccounts()[0]
+	before := snapshot.StatsByRegion["us-east-1"].TotalTokens
+
+	p.UpdateStats("acct", "us-east-1", 90, 0.9)
+
+	if after := snapshot.StatsByRegion["us-east-1"].TotalTokens; after != before {
+		t.Fatalf("earlier snapshot mutated: tokens %d -> %d", before, after)
+	}
+	if got := p.accounts[0].StatsByRegion["us-east-1"].TotalTokens; got != 100 {
+		t.Fatalf("live bucket = %d, want 100", got)
+	}
+	// Every duplicate entry must observe the same updated breakdown.
+	for i := range p.accounts {
+		if got := p.accounts[i].StatsByRegion["us-east-1"].TotalTokens; got != 100 {
+			t.Fatalf("duplicate %d bucket = %d, want 100", i, got)
+		}
+	}
+}
+
+// TestUpdateStatsWithoutRegionKeepsTotals covers callers that cannot determine a
+// region: the totals must still advance rather than silently dropping usage.
+func TestUpdateStatsWithoutRegionKeepsTotals(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatalf("config.Init: %v", err)
+	}
+	p := &AccountPool{}
+	p.accounts = []config.Account{{ID: "acct"}}
+
+	p.UpdateStats("acct", "", 25, 0.5)
+
+	if p.accounts[0].TotalTokens != 25 || p.accounts[0].RequestCount != 1 {
+		t.Fatalf("totals not updated: %+v", p.accounts[0])
+	}
+	if len(p.accounts[0].StatsByRegion) != 0 {
+		t.Fatalf("unknown region should not create a bucket: %+v", p.accounts[0].StatsByRegion)
+	}
+}

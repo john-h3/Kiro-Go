@@ -41,6 +41,9 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 
 	presentation := make([]map[string]interface{}, 0)
 	var lastAccountID string
+	// Track the data-plane region alongside the account so usage is attributed
+	// to the region that actually served the final round.
+	var lastAccountRegion string
 	var totalCredits float64
 	reqStart := time.Now()
 	fallbackInput := estimatedInputTokens
@@ -76,6 +79,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 		}
 		if account != nil {
 			lastAccountID = account.ID
+			lastAccountRegion = kiroRegion(account)
 		}
 		totalCredits += round.credits
 
@@ -128,7 +132,7 @@ func (h *Handler) runWebSearchLoop(ctx context.Context, w http.ResponseWriter, r
 
 		if lastAccountID != "" {
 			h.pool.RecordSuccess(lastAccountID)
-			h.pool.UpdateStats(lastAccountID, inputTokens+outputTokens, totalCredits)
+			h.pool.UpdateStats(lastAccountID, lastAccountRegion, inputTokens+outputTokens, totalCredits)
 		}
 		h.recordSuccessForApiKey(apiKeyID, inputTokens, outputTokens, totalCredits)
 		h.recordSuccessLog("claude", req.Model, lastAccountID, inputTokens+outputTokens, totalCredits, time.Since(reqStart).Milliseconds())

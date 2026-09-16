@@ -5,6 +5,7 @@ import (
 	"kiro-go/config"
 	"kiro-go/logger"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -149,6 +150,43 @@ func (h *Handler) apiSetAccountProfile(w http.ResponseWriter, r *http.Request, i
 		"profileArn": profileARN,
 		"region":     region,
 	})
+}
+
+// regionStatsForResponse renders an account's per-region usage breakdown for the
+// admin API, newest activity first.
+//
+// The pool snapshot is preferred because it holds the most recent in-memory
+// counters, but it only contains routable accounts — an account excluded from
+// the pool (over quota, disabled) has a zero-valued snapshot, so the persisted
+// configuration is used as the fallback.
+func regionStatsForResponse(persisted *config.Account, poolStats config.Account) []map[string]interface{} {
+	breakdown := poolStats.StatsByRegion
+	if len(breakdown) == 0 && persisted != nil {
+		breakdown = persisted.StatsByRegion
+	}
+	if len(breakdown) == 0 {
+		return nil
+	}
+
+	items := make([]map[string]interface{}, 0, len(breakdown))
+	for region, stats := range breakdown {
+		items = append(items, map[string]interface{}{
+			"region":       region,
+			"requestCount": stats.RequestCount,
+			"totalTokens":  stats.TotalTokens,
+			"totalCredits": stats.TotalCredits,
+			"lastUsed":     stats.LastUsed,
+		})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		left, _ := items[i]["lastUsed"].(int64)
+		right, _ := items[j]["lastUsed"].(int64)
+		if left != right {
+			return left > right
+		}
+		return items[i]["region"].(string) < items[j]["region"].(string)
+	})
+	return items
 }
 
 // lookupRegionSwitchAccount resolves an account that supports region switching,

@@ -458,14 +458,20 @@ func (p *AccountPool) AvailableCount() int {
 	return count
 }
 
-// UpdateStats 更新账号统计
-func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
+// UpdateStats 更新账号统计。
+//
+// region is the Kiro data-plane region that served the request. Because each
+// region carries its own upstream subscription and quota, usage is accumulated
+// into a per-region bucket in addition to the account-wide totals. An empty
+// region only updates the totals.
+func (p *AccountPool) UpdateStats(id, region string, tokens int, credits float64) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	var updated bool
 	var requestCount, errorCount, totalTokens int
 	var totalCredits float64
 	var lastUsed int64
+	var regionStats map[string]config.RegionStats
 	for i := range p.accounts {
 		if p.accounts[i].ID == id {
 			if !updated {
@@ -473,12 +479,20 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 				p.accounts[i].TotalTokens += tokens
 				p.accounts[i].TotalCredits += credits
 				p.accounts[i].LastUsed = time.Now().Unix()
+				// Copy-on-write: the pool holds one entry per weight unit and
+				// GetAllAccounts hands out shallow copies, so mutating a shared
+				// map in place would be visible through those copies. Build a
+				// fresh map instead and publish it to every duplicate.
+				p.accounts[i].StatsByRegion = config.AccumulateRegionStats(
+					p.accounts[i].StatsByRegion, region, tokens, credits, p.accounts[i].LastUsed,
+				)
 
 				requestCount = p.accounts[i].RequestCount
 				errorCount = p.accounts[i].ErrorCount
 				totalTokens = p.accounts[i].TotalTokens
 				totalCredits = p.accounts[i].TotalCredits
 				lastUsed = p.accounts[i].LastUsed
+				regionStats = p.accounts[i].StatsByRegion
 				updated = true
 				continue
 			}
@@ -487,10 +501,11 @@ func (p *AccountPool) UpdateStats(id string, tokens int, credits float64) {
 			p.accounts[i].TotalTokens = totalTokens
 			p.accounts[i].TotalCredits = totalCredits
 			p.accounts[i].LastUsed = lastUsed
+			p.accounts[i].StatsByRegion = regionStats
 		}
 	}
 	if updated {
-		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed)
+		go config.UpdateAccountStats(id, requestCount, errorCount, totalTokens, totalCredits, lastUsed, regionStats)
 	}
 }
 
