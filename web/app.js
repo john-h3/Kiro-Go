@@ -1235,8 +1235,10 @@
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
-      detailItem(t('detail.region'), a.region || 'us-east-1') +
+      detailItem(t('detail.region'), a.activeRegion || a.region || 'us-east-1') +
       '</div></div>' +
+
+      renderRegionSection(a, idAttr) +
 
       '<div class="detail-section"><h4>' + escapeHtml(t('detail.machineId')) + '</h4><div class="machine-id-row">' +
       '<input type="text" id="machineIdInput" value="' + escapeAttr(a.machineId || '') + '" placeholder="UUID" />' +
@@ -1366,6 +1368,95 @@
       return '<span class="badge badge-muted">' + escapeHtml(t('accounts.overageOff')) + '</span>';
     }
     return '';
+  }
+  // Region switching applies to OAuth accounts only. API-key accounts route by
+  // their imported region and own no Kiro profile ARN.
+  function supportsRegionSwitch(a) {
+    return (a.authMethod || '').toLowerCase() !== 'api_key';
+  }
+  function renderRegionSection(a, idAttr) {
+    if (!supportsRegionSwitch(a)) return '';
+    const active = a.activeRegion || a.region || 'us-east-1';
+    return '<div class="detail-section">' +
+      '<h4>' + escapeHtml(t('detail.regionSwitch')) +
+      ' <button class="btn btn-sm btn-outline" data-detail-action="loadRegions" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.regionLoad')) + '</button>' +
+      (a.profileArnPinned ? ' <button class="btn btn-sm btn-outline" data-detail-action="resetRegion" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.regionReset')) + '</button>' : '') +
+      '</h4>' +
+      '<p class="help-block">' + escapeHtml(t('detail.regionSwitchHint')) + '</p>' +
+      '<div class="detail-grid">' +
+      detailItem(t('detail.regionActive'), active) +
+      detailItem(t('detail.regionPinned'), a.profileArnPinned ? t('detail.regionPinnedYes') : t('detail.regionPinnedNo')) +
+      '</div>' +
+      '<div id="regionProfileList" class="model-list"></div>' +
+      '</div>';
+  }
+  async function loadRegions(id) {
+    const c = $('regionProfileList');
+    if (!c) return;
+    c.innerHTML = '<p class="empty-state">' + escapeHtml(t('detail.loading')) + '</p>';
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/profiles');
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) {
+        c.innerHTML = '<p class="empty-state">' + escapeHtml(d.error || t('detail.loadFailed')) + '</p>';
+        return;
+      }
+      const profiles = d.profiles || [];
+      if (!profiles.length) {
+        c.innerHTML = '<p class="empty-state">' + escapeHtml(t('detail.regionNoProfiles')) + '</p>';
+        return;
+      }
+      c.innerHTML = profiles.map(p =>
+        '<div class="model-item">' +
+        '<span>' + escapeHtml(p.region) + (p.name ? ' · ' + escapeHtml(p.name) : '') + '</span>' +
+        (p.current
+          ? '<span class="badge badge-success">' + escapeHtml(t('detail.regionCurrent')) + '</span>'
+          : '<button class="btn btn-sm btn-primary" data-region-arn="' + escapeAttr(p.arn) + '" data-id="' + escapeAttr(id) + '" type="button">' + escapeHtml(t('detail.regionUse')) + '</button>') +
+        '</div>'
+      ).join('');
+    } catch (e) {
+      c.innerHTML = '<p class="empty-state">' + escapeHtml(t('detail.loadFailed')) + '</p>';
+    }
+  }
+  async function switchRegion(id, profileArn) {
+    const dismiss = toast(t('detail.regionSwitching'), 'info', { duration: 0 });
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/profile', {
+        method: 'POST',
+        body: JSON.stringify({ profileArn }),
+      });
+      const d = await res.json().catch(() => ({}));
+      dismiss();
+      if (!res.ok || d.success === false) {
+        toast((d.error || t('detail.saveFailed')), 'error');
+        return;
+      }
+      toast(t('detail.regionSwitched', d.region || ''), 'success');
+      await loadAccounts();
+      showDetail(id);
+      loadRegions(id);
+    } catch (e) {
+      dismiss();
+      toast(t('detail.saveFailed'), 'error');
+    }
+  }
+  async function resetRegion(id) {
+    try {
+      const res = await api('/accounts/' + encodeURIComponent(id) + '/profile', {
+        method: 'POST',
+        body: JSON.stringify({ reset: true }),
+      });
+      const d = await res.json().catch(() => ({}));
+      if (!res.ok || d.success === false) {
+        toast((d.error || t('detail.saveFailed')), 'error');
+        return;
+      }
+      toast(t('detail.regionResetDone'), 'success');
+      await loadAccounts();
+      showDetail(id);
+    } catch (e) {
+      toast(t('detail.saveFailed'), 'error');
+    }
   }
   function renderOverageBlock(a, idAttr) {
     const status = (a.overageStatus || '').toUpperCase();
@@ -3294,6 +3385,10 @@
   function bindDetailEvents() {
     $('detailBody').addEventListener('click', e => {
       if (e.target.id === 'generateMachineIdBtn') { generateMachineId(); return; }
+      // Per-profile "use this region" buttons are rendered dynamically, so they
+      // carry the target ARN instead of a fixed action name.
+      const regionBtn = e.target.closest('[data-region-arn]');
+      if (regionBtn) { switchRegion(regionBtn.dataset.id, regionBtn.dataset.regionArn); return; }
       const b = e.target.closest('[data-detail-action]');
       if (!b) return;
       const id = b.dataset.id;
@@ -3305,6 +3400,8 @@
       else if (a === 'saveProxyURL') saveProxyURL(id);
       else if (a === 'loadModels') loadModels(id);
       else if (a === 'refreshModels') refreshAccountModels(id);
+      else if (a === 'loadRegions') loadRegions(id);
+      else if (a === 'resetRegion') resetRegion(id);
     });
   }
 
