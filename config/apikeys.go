@@ -4,9 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"regexp"
 	"strings"
 	"time"
 )
+
+var claudeNumericVersionModel = regexp.MustCompile(`^(claude-[a-z0-9-]+)-([0-9]+)[.-]([0-9]{1,2})$`)
 
 // ListApiKeys returns a snapshot of all configured API key entries.
 func ListApiKeys() []ApiKeyEntry {
@@ -119,16 +122,28 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 // ApiKeyAllowsModel reports whether an API key is explicitly allowed to use a
 // client-facing model ID. Empty AllowedModels is deny-all by design.
 func ApiKeyAllowsModel(entry ApiKeyEntry, model string) bool {
-	model = strings.TrimSpace(model)
+	model = normalizeWhitelistModel(model)
 	if model == "" {
 		return false
 	}
 	for _, allowed := range entry.AllowedModels {
-		if strings.EqualFold(strings.TrimSpace(allowed), model) {
+		if normalizeWhitelistModel(allowed) == model {
 			return true
 		}
 	}
 	return false
+}
+
+// normalizeWhitelistModel makes the two client spellings of a numeric Claude
+// version equivalent. For example, claude-haiku-5-5 and claude-haiku-5.5
+// resolve to the same whitelist key. The minor component is limited to two
+// digits so dated snapshots such as claude-sonnet-4-20250514 are unaffected.
+func normalizeWhitelistModel(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if matches := claudeNumericVersionModel.FindStringSubmatch(model); matches != nil {
+		return matches[1] + "-" + matches[2] + "." + matches[3]
+	}
+	return model
 }
 
 func normalizeAllowedModels(models []string) []string {

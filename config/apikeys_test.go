@@ -298,6 +298,25 @@ func TestApiKeyModelWhitelistDefaultsToDenyAndPersists(t *testing.T) {
 	}
 }
 
+func TestApiKeyModelWhitelistClaudeNumericVersionAliases(t *testing.T) {
+	entry := ApiKeyEntry{AllowedModels: []string{"claude-haiku-5-5"}}
+	for _, model := range []string{"claude-haiku-5-5", "claude-haiku-5.5", "CLAUDE-HAIKU-5.5"} {
+		if !ApiKeyAllowsModel(entry, model) {
+			t.Fatalf("expected %q to match the Claude numeric version alias", model)
+		}
+	}
+	for _, model := range []string{"claude-haiku-5-6", "claude-sonnet-5.5", "claude-haiku-5-20250514", "gpt-5-5"} {
+		if ApiKeyAllowsModel(entry, model) {
+			t.Fatalf("did not expect %q to match the Claude numeric version alias", model)
+		}
+	}
+
+	entry.AllowedModels = []string{"claude-sonnet-5.5"}
+	if !ApiKeyAllowsModel(entry, "claude-sonnet-5-5") {
+		t.Fatal("expected dotted Claude version to match dashed request")
+	}
+}
+
 func TestMaskApiKey(t *testing.T) {
 	tests := []struct {
 		in   string
