@@ -39,7 +39,7 @@ docker run -d \
   -e ADMIN_PASSWORD=your_secure_password \
   -v /path/to/data:/app/data \
   --restart unless-stopped \
-  ghcr.io/quorinex/kiro-go:latest
+  ghcr.io/quorinex/kiro-go:main
 ```
 
 ### 源码编译
