@@ -72,9 +72,16 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 
 	// Strip the configured thinking suffix (e.g. "-thinking") if present.
 	suffixLower := strings.ToLower(thinkingSuffix)
-	if strings.HasSuffix(lower, suffixLower) {
+	if suffixLower != "" && strings.HasSuffix(lower, suffixLower) {
 		thinking = true
 		model = model[:len(model)-len(thinkingSuffix)]
+		lower = strings.ToLower(model)
+	}
+
+	// User rules run before the built-in aliases and version normalization so
+	// operators can redirect any client-facing model name to one stable ID.
+	if rewritten, ok := RewriteModel(model); ok {
+		model = rewritten
 		lower = strings.ToLower(model)
 	}
 
@@ -99,6 +106,39 @@ func ParseModelAndThinking(model string, thinkingSuffix string) (string, bool) {
 	return model, thinking
 }
 
+// RewriteModel applies the first enabled configured model rewrite rule.
+// Expressions are case-insensitive and support exact names plus '*' (any
+// sequence) and '?' (one character), matching shell-style glob semantics.
+func RewriteModel(model string) (string, bool) {
+	for _, rule := range config.GetModelRewriteRules() {
+		if !rule.Enabled || strings.TrimSpace(rule.Match) == "" || strings.TrimSpace(rule.Rewrite) == "" {
+			continue
+		}
+		if globModelMatch(strings.ToLower(strings.TrimSpace(rule.Match)), strings.ToLower(model)) {
+			return strings.TrimSpace(rule.Rewrite), true
+		}
+	}
+	return model, false
+}
+
+func globModelMatch(pattern, value string) bool {
+	var b strings.Builder
+	b.WriteByte('^')
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '*':
+			b.WriteString(".*")
+		case '?':
+			b.WriteByte('.')
+		default:
+			b.WriteString(regexp.QuoteMeta(pattern[i : i+1]))
+		}
+	}
+	b.WriteByte('$')
+	re, err := regexp.Compile(b.String())
+	return err == nil && re.MatchString(value)
+}
+
 func resolveClaudeThinkingMode(model string, thinkingCfg *ClaudeThinkingConfig, thinkingSuffix string) (string, bool) {
 	actualModel, suffixThinking := ParseModelAndThinking(model, thinkingSuffix)
 	return actualModel, suffixThinking || isClaudeThinkingRequested(thinkingCfg)
@@ -120,16 +160,17 @@ func MapModel(model string) string {
 // ==================== Claude API 类型 ====================
 
 type ClaudeRequest struct {
-	Model       string                `json:"model"`
-	Messages    []ClaudeMessage       `json:"messages"`
-	MaxTokens   int                   `json:"max_tokens"`
-	Temperature float64               `json:"temperature,omitempty"`
-	TopP        float64               `json:"top_p,omitempty"`
-	Stream      bool                  `json:"stream,omitempty"`
-	System      interface{}           `json:"system,omitempty"` // string or []SystemBlock
-	Thinking    *ClaudeThinkingConfig `json:"thinking,omitempty"`
-	Tools       []ClaudeTool          `json:"tools,omitempty"`
-	ToolChoice  interface{}           `json:"tool_choice,omitempty"`
+	Model         string                `json:"model"`
+	OriginalModel string                `json:"-"`
+	Messages      []ClaudeMessage       `json:"messages"`
+	MaxTokens     int                   `json:"max_tokens"`
+	Temperature   float64               `json:"temperature,omitempty"`
+	TopP          float64               `json:"top_p,omitempty"`
+	Stream        bool                  `json:"stream,omitempty"`
+	System        interface{}           `json:"system,omitempty"` // string or []SystemBlock
+	Thinking      *ClaudeThinkingConfig `json:"thinking,omitempty"`
+	Tools         []ClaudeTool          `json:"tools,omitempty"`
+	ToolChoice    interface{}           `json:"tool_choice,omitempty"`
 }
 
 type ClaudeThinkingConfig struct {
@@ -1083,13 +1124,14 @@ func mapOpenAIFinishReason(reason string, toolCount int) string {
 // ==================== OpenAI API 类型 ====================
 
 type OpenAIRequest struct {
-	Model       string          `json:"model"`
-	Messages    []OpenAIMessage `json:"messages"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
-	Temperature float64         `json:"temperature,omitempty"`
-	TopP        float64         `json:"top_p,omitempty"`
-	Stream      bool            `json:"stream,omitempty"`
-	Tools       []OpenAITool    `json:"tools,omitempty"`
+	Model         string          `json:"model"`
+	OriginalModel string          `json:"-"`
+	Messages      []OpenAIMessage `json:"messages"`
+	MaxTokens     int             `json:"max_tokens,omitempty"`
+	Temperature   float64         `json:"temperature,omitempty"`
+	TopP          float64         `json:"top_p,omitempty"`
+	Stream        bool            `json:"stream,omitempty"`
+	Tools         []OpenAITool    `json:"tools,omitempty"`
 }
 
 type OpenAIMessage struct {

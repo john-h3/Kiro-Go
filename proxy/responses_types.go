@@ -4,6 +4,7 @@ import "encoding/json"
 
 type ResponsesRequest struct {
 	Model              string            `json:"model"`
+	OriginalModel      string            `json:"-"`
 	Input              json.RawMessage   `json:"input"`
 	Instructions       string            `json:"instructions,omitempty"`
 	Stream             bool              `json:"stream,omitempty"`
