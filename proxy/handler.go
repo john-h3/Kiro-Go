@@ -398,6 +398,22 @@ func (h *Handler) authenticateForOpenAI(w http.ResponseWriter, r *http.Request) 
 	return withApiKeyContext(r, entry)
 }
 
+func (h *Handler) enforceClaudeModelAccess(w http.ResponseWriter, r *http.Request, model string) bool {
+	if apiKeyAllowsModel(r, model) {
+		return true
+	}
+	h.sendClaudeError(w, http.StatusForbidden, "model_not_allowed", "API key is not authorized for model: "+strings.TrimSpace(model))
+	return false
+}
+
+func (h *Handler) enforceOpenAIModelAccess(w http.ResponseWriter, r *http.Request, model string) bool {
+	if apiKeyAllowsModel(r, model) {
+		return true
+	}
+	h.sendOpenAIError(w, http.StatusForbidden, "model_not_allowed", "API key is not authorized for model: "+strings.TrimSpace(model))
+	return false
+}
+
 // ServeHTTP 路由分发
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.Path
@@ -506,6 +522,18 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 
 // handleModels 模型列表
 func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
+	entry, err := h.authenticate(r)
+	if err != nil {
+		ae, _ := err.(*authError)
+		if ae == nil {
+			ae = newAuthError(http.StatusUnauthorized, "authentication_error", err.Error())
+		}
+		h.sendOpenAIError(w, ae.status, ae.code, ae.message)
+		return
+	}
+	if entry != nil {
+		r = withApiKeyContext(r, entry)
+	}
 	// 尝试用缓存的真实模型列表
 	h.modelsCacheMu.RLock()
 	cached := h.cachedModels
@@ -530,6 +558,15 @@ func (h *Handler) handleModels(w http.ResponseWriter, r *http.Request) {
 		buildModelInfo("gpt-4o", "kiro-proxy", true),
 		buildModelInfo("gpt-4", "kiro-proxy", true),
 	)
+	if entry != nil {
+		filtered := make([]map[string]interface{}, 0, len(models))
+		for _, model := range models {
+			if id, ok := model["id"].(string); ok && config.ApiKeyAllowsModel(*entry, id) {
+				filtered = append(filtered, model)
+			}
+		}
+		models = filtered
+	}
 
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -826,6 +863,9 @@ func (h *Handler) handleCountTokens(w http.ResponseWriter, r *http.Request) {
 	}
 
 	thinkingCfg := config.GetThinkingConfig()
+	if !h.enforceClaudeModelAccess(w, r, req.Model) {
+		return
+	}
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
 	effectiveReq := cloneClaudeRequestForThinking(&req, thinking)
@@ -870,6 +910,9 @@ func (h *Handler) handleClaudeMessagesInternal(w http.ResponseWriter, r *http.Re
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
 	originalModel := req.Model
+	if !h.enforceClaudeModelAccess(w, r, originalModel) {
+		return
+	}
 	req.OriginalModel = originalModel
 	actualModel, thinking := resolveClaudeThinkingMode(req.Model, req.Thinking, thinkingCfg.Suffix)
 	req.Model = actualModel
@@ -1738,6 +1781,9 @@ func (h *Handler) handleOpenAIChat(w http.ResponseWriter, r *http.Request) {
 	// 解析模型和 thinking 模式
 	thinkingCfg := config.GetThinkingConfig()
 	originalModel := req.Model
+	if !h.enforceOpenAIModelAccess(w, r, originalModel) {
+		return
+	}
 	actualModel, thinking := ParseModelAndThinking(req.Model, thinkingCfg.Suffix)
 	req.Model = actualModel
 	req.OriginalModel = originalModel
@@ -2559,6 +2605,8 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		h.apiListApiKeys(w, r)
 	case path == "/api-keys" && r.Method == "POST":
 		h.apiCreateApiKey(w, r)
+	case path == "/models" && r.Method == "GET":
+		h.apiGetModels(w, r)
 	case strings.HasPrefix(path, "/api-keys/") && strings.HasSuffix(path, "/reset-usage") && r.Method == "POST":
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/api-keys/"), "/reset-usage")
 		h.apiResetApiKeyUsage(w, r, id)
@@ -2572,6 +2620,31 @@ func (h *Handler) handleAdminAPI(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(404)
 		json.NewEncoder(w).Encode(map[string]string{"error": "Not Found"})
 	}
+}
+
+// apiGetModels returns the complete model catalog for the admin whitelist
+// editor. It is protected by the admin password like the other admin APIs.
+func (h *Handler) apiGetModels(w http.ResponseWriter, r *http.Request) {
+	h.modelsCacheMu.RLock()
+	cached := append([]ModelInfo(nil), h.cachedModels...)
+	h.modelsCacheMu.RUnlock()
+	if len(cached) == 0 {
+		h.refreshModelsCache()
+		h.modelsCacheMu.RLock()
+		cached = append([]ModelInfo(nil), h.cachedModels...)
+		h.modelsCacheMu.RUnlock()
+	}
+	thinkingSuffix := config.GetThinkingConfig().Suffix
+	models := buildAnthropicModelsResponse(cached, thinkingSuffix)
+	if len(models) == 0 {
+		models = fallbackAnthropicModels(thinkingSuffix)
+	}
+	models = append(models,
+		buildModelInfo("auto", "kiro-proxy", true),
+		buildModelInfo("gpt-4o", "kiro-proxy", true),
+		buildModelInfo("gpt-4", "kiro-proxy", true),
+	)
+	json.NewEncoder(w).Encode(map[string]interface{}{"object": "list", "data": models})
 }
 
 func (h *Handler) apiUpdateModelRewriteRules(w http.ResponseWriter, r *http.Request) {

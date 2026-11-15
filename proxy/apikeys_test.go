@@ -346,3 +346,52 @@ func TestAuthenticateRequiredWithoutKeysFailsClosed(t *testing.T) {
 		t.Fatalf("expected provided-key path to also fail closed when nothing is configured")
 	}
 }
+
+func TestApiKeyModelWhitelistRejectsClaudeRequest(t *testing.T) {
+	mustInitConfig(t)
+	if _, err := config.AddApiKey(config.ApiKeyEntry{Name: "models", Key: "sk-models", Enabled: true}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	requireAuth(t)
+
+	h := &Handler{}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{"model":"claude-sonnet-4.5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}`))
+	r.Header.Set("Authorization", "Bearer sk-models")
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("expected model whitelist rejection, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "model_not_allowed") {
+		t.Fatalf("expected model_not_allowed response, got %s", rec.Body.String())
+	}
+}
+
+func TestApiKeyModelWhitelistFiltersModelList(t *testing.T) {
+	mustInitConfig(t)
+	entry, err := config.AddApiKey(config.ApiKeyEntry{
+		Name: "models", Key: "sk-models", Enabled: true,
+		AllowedModels: []string{"claude-sonnet-4.5"},
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	requireAuth(t)
+	h := &Handler{cachedModels: []ModelInfo{{ModelId: "claude-sonnet-4.5"}}}
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	r.Header.Set("Authorization", "Bearer "+entry.Key)
+	h.ServeHTTP(rec, r)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected model list success, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Data []map[string]interface{} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode model list: %v", err)
+	}
+	if len(payload.Data) != 1 || payload.Data[0]["id"] != "claude-sonnet-4.5" {
+		t.Fatalf("expected only explicitly allowed model, got %+v", payload.Data)
+	}
+}

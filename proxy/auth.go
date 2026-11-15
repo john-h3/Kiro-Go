@@ -111,3 +111,15 @@ func apiKeyIDFromContext(ctx context.Context) string {
 	}
 	return ""
 }
+
+// apiKeyAllowsModel enforces the per-key model whitelist after authentication.
+// Requests that did not authenticate through a multi-key entry (legacy key or
+// auth disabled) retain the existing unrestricted behavior.
+func apiKeyAllowsModel(r *http.Request, model string) bool {
+	id := apiKeyIDFromContext(r.Context())
+	if id == "" {
+		return true
+	}
+	entry := config.GetApiKeyEntry(id)
+	return entry != nil && config.ApiKeyAllowsModel(*entry, model)
+}

@@ -180,6 +180,11 @@ type ApiKeyEntry struct {
 	TokenLimit  int64   `json:"tokenLimit,omitempty"`
 	CreditLimit float64 `json:"creditLimit,omitempty"`
 
+	// AllowedModels contains the client-facing model IDs this key may use.
+	// An empty list intentionally denies access to every model. This keeps newly
+	// created and migrated keys disabled until an operator grants access.
+	AllowedModels []string `json:"allowedModels,omitempty"`
+
 	// Cumulative usage (never auto-reset)
 	TokensUsed    int64   `json:"tokensUsed,omitempty"`
 	CreditsUsed   float64 `json:"creditsUsed,omitempty"`
