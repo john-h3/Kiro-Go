@@ -21,6 +21,7 @@
   let filterStatus = 'all';
   let privacyModeEnabled = true;
   let promptRules = [];
+  let modelRewriteRules = [];
   let builderIdSession = '';
   let builderIdPollTimer = null;
   let iamSession = '';
@@ -779,7 +780,9 @@
         '<td>' + escapeHtml(formatLogTime(l.time)) + '</td>' +
         '<td>' + statusCell + '</td>' +
         '<td>' + escapeHtml(l.endpoint) + '</td>' +
-        '<td>' + escapeHtml(l.model || '-') + '</td>' +
+        '<td>' + (l.originalModel && l.rewrittenModel
+          ? '<span title="' + escapeAttr(l.originalModel + ' → ' + l.rewrittenModel) + '">' + escapeHtml(l.originalModel) + '<br><small class="text-muted">→ ' + escapeHtml(l.rewrittenModel) + '</small></span>'
+          : escapeHtml(l.model || '-')) + '</td>' +
         '<td>' + escapeHtml(accountLabel(l.accountId)) + '</td>' +
         '<td>' + (l.tokens ? formatNum(l.tokens) : '-') + '</td>' +
         '<td>' + (l.duration ? (l.duration + 'ms') : '-') + '</td>' +
@@ -1676,7 +1679,7 @@
     const d = await res.json();
     $('requireApiKey').checked = d.requireApiKey;
     $('allowOverUsage').checked = d.allowOverUsage || false;
-    await Promise.all([loadThinkingConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
+    await Promise.all([loadThinkingConfig(), loadModelRewriteConfig(), loadEndpointConfig(), loadProxyConfig(), loadPromptFilter(), loadApiKeys()]);
     refreshCustomSelects();
   }
   async function loadThinkingConfig() {
@@ -1697,6 +1700,54 @@
     const d = await res.json();
     if (d.success) toast(t('settings.thinkingSaved'), 'success');
     else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  async function loadModelRewriteConfig() {
+    const res = await api('/model-rewrites');
+    const d = await res.json();
+    modelRewriteRules = (d.rules || []).map(r => ({
+      match: r.match || '',
+      rewrite: r.rewrite || '',
+      enabled: r.enabled !== false
+    }));
+    renderModelRewriteRules();
+  }
+  async function saveModelRewriteConfig() {
+    const invalid = modelRewriteRules.some(r => !r.match.trim() || !r.rewrite.trim());
+    if (invalid) { toast(t('settings.modelRewriteInvalid'), 'error'); return; }
+    const res = await api('/model-rewrites', { method: 'POST', body: JSON.stringify({ rules: modelRewriteRules }) });
+    const d = await res.json();
+    if (d.success) toast(t('settings.modelRewriteSaved'), 'success');
+    else toast(t('common.saveFailed') + ': ' + (d.error || ''), 'error');
+  }
+  function renderModelRewriteRules() {
+    const c = $('modelRewriteRules');
+    if (!c) return;
+    if (!modelRewriteRules.length) {
+      c.innerHTML = '<small class="text-xs muted-text">' + escapeHtml(t('settings.noModelRewriteRules')) + '</small>';
+      return;
+    }
+    c.innerHTML = modelRewriteRules.map((r, i) =>
+      '<div class="rule-card' + (r.enabled ? '' : ' disabled') + '">' +
+      '<div class="rule-header">' +
+      '<label class="switch"><input type="checkbox" ' + (r.enabled ? 'checked' : '') + ' data-model-rule-toggle="' + i + '" /><span class="slider"></span></label>' +
+      '<div class="rule-meta"><span class="rule-type">' + escapeHtml(t('settings.modelRewriteRule', i + 1)) + '</span></div>' +
+      '<button class="rule-remove" data-model-rule-up="' + i + '" type="button" aria-label="' + escapeAttr(t('settings.moveRuleUp')) + '" title="' + escapeAttr(t('settings.moveRuleUp')) + '" ' + (i === 0 ? 'disabled' : '') + '><i class="fa-solid fa-arrow-up" aria-hidden="true"></i></button>' +
+      '<button class="rule-remove" data-model-rule-down="' + i + '" type="button" aria-label="' + escapeAttr(t('settings.moveRuleDown')) + '" title="' + escapeAttr(t('settings.moveRuleDown')) + '" ' + (i === modelRewriteRules.length - 1 ? 'disabled' : '') + '><i class="fa-solid fa-arrow-down" aria-hidden="true"></i></button>' +
+      '<button class="rule-remove" data-model-rule-remove="' + i + '" type="button" aria-label="' + escapeAttr(t('common.remove')) + '">&times;</button>' +
+      '</div>' +
+      '<div class="rule-body">' +
+      '<div class="rule-field"><label>' + escapeHtml(t('settings.modelRewriteMatch')) + '</label>' +
+      '<input value="' + escapeAttr(r.match) + '" data-model-rule-idx="' + i + '" data-model-rule-field="match" placeholder="claude-sonnet-*" /></div>' +
+      '<div class="rule-field"><label>' + escapeHtml(t('settings.modelRewriteTarget')) + '</label>' +
+      '<input value="' + escapeAttr(r.rewrite) + '" data-model-rule-idx="' + i + '" data-model-rule-field="rewrite" placeholder="claude-sonnet-4.5" /></div>' +
+      '</div></div>'
+    ).join('');
+  }
+  function addModelRewriteRule() {
+    modelRewriteRules.push({ match: '', rewrite: '', enabled: true });
+    renderModelRewriteRules();
+    const inputs = qsa('#modelRewriteRules input[data-model-rule-field="match"]');
+    if (inputs.length) inputs[inputs.length - 1].focus();
   }
   async function loadEndpointConfig() {
     const res = await api('/endpoint');
@@ -3337,6 +3388,33 @@
     $('saveRequireApiKeyBtn').addEventListener('click', saveRequireApiKey);
     $('saveOverUsageBtn').addEventListener('click', saveOverUsageConfig);
     $('saveThinkingBtn').addEventListener('click', saveThinkingConfig);
+    $('saveModelRewriteBtn').addEventListener('click', saveModelRewriteConfig);
+    $('addModelRewriteBtn').addEventListener('click', addModelRewriteRule);
+    $('modelRewriteRules').addEventListener('input', e => {
+      const idx = e.target.dataset.modelRuleIdx;
+      const field = e.target.dataset.modelRuleField;
+      if (idx != null && field) modelRewriteRules[idx][field] = e.target.value;
+    });
+    $('modelRewriteRules').addEventListener('change', e => {
+      const idx = e.target.dataset.modelRuleToggle;
+      if (idx == null) return;
+      modelRewriteRules[idx].enabled = e.target.checked;
+      renderModelRewriteRules();
+    });
+    $('modelRewriteRules').addEventListener('click', e => {
+      const remove = e.target.closest('[data-model-rule-remove]');
+      if (remove) {
+        modelRewriteRules.splice(Number(remove.dataset.modelRuleRemove), 1);
+        renderModelRewriteRules();
+        return;
+      }
+      const up = e.target.closest('[data-model-rule-up]');
+      const down = e.target.closest('[data-model-rule-down]');
+      const idx = Number((up || down || {}).dataset?.modelRuleUp ?? (down || {}).dataset?.modelRuleDown);
+      if (up && idx > 0) [modelRewriteRules[idx - 1], modelRewriteRules[idx]] = [modelRewriteRules[idx], modelRewriteRules[idx - 1]];
+      if (down && idx < modelRewriteRules.length - 1) [modelRewriteRules[idx], modelRewriteRules[idx + 1]] = [modelRewriteRules[idx + 1], modelRewriteRules[idx]];
+      if (up || down) renderModelRewriteRules();
+    });
     $('saveEndpointBtn').addEventListener('click', saveEndpointConfig);
     $('changePasswordBtn').addEventListener('click', changePassword);
     $('proxyType').addEventListener('change', onProxyTypeChange);

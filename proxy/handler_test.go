@@ -511,6 +511,19 @@ func TestMergeUniqueModelsPreservesUnionAcrossAccounts(t *testing.T) {
 	}
 }
 
+func TestRequestLogKeepsOriginalAndRewrittenModels(t *testing.T) {
+	h := &Handler{}
+	h.recordSuccessLog("openai", "claude-sonnet-4.5", "account", 10, 0, 5, "client-model-v2")
+
+	logs := h.getRequestLogs()
+	if len(logs) != 1 {
+		t.Fatalf("expected one request log, got %d", len(logs))
+	}
+	if logs[0].OriginalModel != "client-model-v2" || logs[0].RewrittenModel != "claude-sonnet-4.5" {
+		t.Fatalf("unexpected model rewrite log fields: %+v", logs[0])
+	}
+}
+
 func TestBuildAnthropicModelsResponseGeneratesThinkingVariants(t *testing.T) {
 	models := buildAnthropicModelsResponse([]ModelInfo{{
 		ModelId:    "claude-sonnet-4.5",

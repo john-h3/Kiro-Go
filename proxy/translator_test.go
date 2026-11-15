@@ -1,9 +1,33 @@
 package proxy
 
 import (
+	"kiro-go/config"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestRewriteModelRules(t *testing.T) {
+	if err := config.Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = config.UpdateModelRewriteRules(nil) })
+	if err := config.UpdateModelRewriteRules([]config.ModelRewriteRule{
+		{Match: "claude-sonnet-*", Rewrite: "claude-opus-4.8", Enabled: true},
+		{Match: "exact-model", Rewrite: "claude-haiku-4.5", Enabled: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := ParseModelAndThinking("Claude-Sonnet-4.6-thinking", "-thinking"); !ok || got != "claude-opus-4.8" {
+		t.Fatalf("wildcard rewrite = %q, thinking=%v", got, ok)
+	}
+	if got, ok := ParseModelAndThinking("exact-model", "-thinking"); ok || got != "claude-haiku-4.5" {
+		t.Fatalf("exact rewrite = %q, thinking=%v", got, ok)
+	}
+	if got, ok := ParseModelAndThinking("unchanged", "-thinking"); ok || got != "unchanged" {
+		t.Fatalf("unexpected rewrite = %q, thinking=%v", got, ok)
+	}
+}
 
 func TestExtractOpenAIMessageTextStructured(t *testing.T) {
 	content := []interface{}{

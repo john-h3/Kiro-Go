@@ -156,6 +156,14 @@ type PromptFilterRule struct {
 	Enabled bool   `json:"enabled"`           // Whether this rule is active
 }
 
+// ModelRewriteRule maps a client model expression to a single upstream model ID.
+// Match supports exact names as well as shell-style '*' and '?' wildcards.
+type ModelRewriteRule struct {
+	Match   string `json:"match"`
+	Rewrite string `json:"rewrite"`
+	Enabled bool   `json:"enabled"`
+}
+
 // ApiKeyEntry represents a single API key with optional usage limits and counters.
 // Limits with value 0 are treated as "no limit". Counters are cumulative and never reset
 // automatically; operators can use the admin endpoint to manually reset them.
@@ -193,9 +201,10 @@ type Config struct {
 	Accounts      []Account     `json:"accounts"` // Registered Kiro accounts
 
 	// Thinking mode configuration for extended reasoning output
-	ThinkingSuffix       string `json:"thinkingSuffix,omitempty"`       // Model suffix to trigger thinking mode (default: "-thinking")
-	OpenAIThinkingFormat string `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
-	ClaudeThinkingFormat string `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
+	ThinkingSuffix       string             `json:"thinkingSuffix,omitempty"` // Model suffix to trigger thinking mode (default: "-thinking")
+	ModelRewriteRules    []ModelRewriteRule `json:"modelRewriteRules,omitempty"`
+	OpenAIThinkingFormat string             `json:"openaiThinkingFormat,omitempty"` // OpenAI output format: "reasoning_content", "thinking", or "think"
+	ClaudeThinkingFormat string             `json:"claudeThinkingFormat,omitempty"` // Claude output format: "reasoning_content", "thinking", or "think"
 
 	// Endpoint configuration: "auto", "kiro", "codewhisperer", or "amazonq"
 	PreferredEndpoint string `json:"preferredEndpoint,omitempty"`
@@ -1156,6 +1165,29 @@ func UpdateThinkingConfig(suffix, openaiFormat, claudeFormat string) error {
 	cfg.ThinkingSuffix = suffix
 	cfg.OpenAIThinkingFormat = openaiFormat
 	cfg.ClaudeThinkingFormat = claudeFormat
+	return Save()
+}
+
+// GetModelRewriteRules returns a copy of the configured model rewrite rules.
+func GetModelRewriteRules() []ModelRewriteRule {
+	cfgLock.RLock()
+	defer cfgLock.RUnlock()
+	if cfg == nil || len(cfg.ModelRewriteRules) == 0 {
+		return []ModelRewriteRule{}
+	}
+	rules := make([]ModelRewriteRule, len(cfg.ModelRewriteRules))
+	copy(rules, cfg.ModelRewriteRules)
+	return rules
+}
+
+// UpdateModelRewriteRules replaces and persists the model rewrite rules.
+func UpdateModelRewriteRules(rules []ModelRewriteRule) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	if rules == nil {
+		rules = []ModelRewriteRule{}
+	}
+	cfg.ModelRewriteRules = rules
 	return Save()
 }
 
