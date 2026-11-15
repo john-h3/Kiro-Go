@@ -17,14 +17,15 @@ import (
 )
 
 type IamSsoSession struct {
-	ClientID     string
-	ClientSecret string
-	CodeVerifier string
-	State        string
-	Region       string
-	StartUrl     string
-	RedirectUri  string
-	ExpiresAt    time.Time
+	ClientID             string
+	ClientSecret         string
+	CodeVerifier         string
+	State                string
+	Region               string
+	StartUrl             string
+	RedirectUri          string
+	ReplacementAccountID string
+	ExpiresAt            time.Time
 }
 
 var (
@@ -41,7 +42,11 @@ var scopes = []string{
 }
 
 // StartIamSsoLogin 发起 IAM SSO 登录
-func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, expiresIn int, err error) {
+func StartIamSsoLogin(startUrl, region string, replacementAccountIDs ...string) (sessionID, authorizeUrl string, expiresIn int, err error) {
+	replacementAccountID := ""
+	if len(replacementAccountIDs) > 0 {
+		replacementAccountID = replacementAccountIDs[0]
+	}
 	if region == "" {
 		region = "us-east-1"
 	}
@@ -75,14 +80,15 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	// 4. 保存会话
 	sessionID = uuid.New().String()
 	session := &IamSsoSession{
-		ClientID:     clientID,
-		ClientSecret: clientSecret,
-		CodeVerifier: codeVerifier,
-		State:        state,
-		Region:       region,
-		StartUrl:     startUrl,
-		RedirectUri:  redirectUri,
-		ExpiresAt:    time.Now().Add(10 * time.Minute),
+		ClientID:             clientID,
+		ClientSecret:         clientSecret,
+		CodeVerifier:         codeVerifier,
+		State:                state,
+		Region:               region,
+		StartUrl:             startUrl,
+		RedirectUri:          redirectUri,
+		ReplacementAccountID: replacementAccountID,
+		ExpiresAt:            time.Now().Add(10 * time.Minute),
 	}
 
 	sessionsMu.Lock()
@@ -95,27 +101,33 @@ func StartIamSsoLogin(startUrl, region string) (sessionID, authorizeUrl string, 
 	return sessionID, authorizeUrl, 600, nil
 }
 
-// CompleteIamSsoLogin 完成 IAM SSO 登录
+// CompleteIamSsoLogin 完成 IAM SSO 登录，保留原有返回值以兼容外部调用方。
 func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region string, expiresIn int, err error) {
+	accessToken, refreshToken, clientID, clientSecret, region, _, expiresIn, err = CompleteIamSsoLoginWithTarget(sessionID, callbackUrl)
+	return
+}
+
+// CompleteIamSsoLoginWithTarget 完成 IAM SSO 登录并返回可选的替换目标账号。
+func CompleteIamSsoLoginWithTarget(sessionID, callbackUrl string) (accessToken, refreshToken, clientID, clientSecret, region, replacementAccountID string, expiresIn int, err error) {
 	sessionsMu.RLock()
 	session, ok := sessions[sessionID]
 	sessionsMu.RUnlock()
 
 	if !ok {
-		return "", "", "", "", "", 0, fmt.Errorf("会话不存在或已过期")
+		return "", "", "", "", "", "", 0, fmt.Errorf("会话不存在或已过期")
 	}
 
 	if time.Now().After(session.ExpiresAt) {
 		sessionsMu.Lock()
 		delete(sessions, sessionID)
 		sessionsMu.Unlock()
-		return "", "", "", "", "", 0, fmt.Errorf("会话已过期")
+		return "", "", "", "", "", "", 0, fmt.Errorf("会话已过期")
 	}
 
 	// 解析回调 URL
 	parsedUrl, err := url.Parse(callbackUrl)
 	if err != nil {
-		return "", "", "", "", "", 0, fmt.Errorf("无效的回调 URL")
+		return "", "", "", "", "", "", 0, fmt.Errorf("无效的回调 URL")
 	}
 
 	code := parsedUrl.Query().Get("code")
@@ -123,15 +135,15 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	errorParam := parsedUrl.Query().Get("error")
 
 	if errorParam != "" {
-		return "", "", "", "", "", 0, fmt.Errorf("授权失败: %s", errorParam)
+		return "", "", "", "", "", "", 0, fmt.Errorf("授权失败: %s", errorParam)
 	}
 
 	if state != session.State {
-		return "", "", "", "", "", 0, fmt.Errorf("状态不匹配，可能存在安全风险")
+		return "", "", "", "", "", "", 0, fmt.Errorf("状态不匹配，可能存在安全风险")
 	}
 
 	if code == "" {
-		return "", "", "", "", "", 0, fmt.Errorf("未收到授权码")
+		return "", "", "", "", "", "", 0, fmt.Errorf("未收到授权码")
 	}
 
 	// 用 code 换取 token
@@ -145,7 +157,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 		session.RedirectUri,
 	)
 	if err != nil {
-		return "", "", "", "", "", 0, err
+		return "", "", "", "", "", "", 0, err
 	}
 
 	// 清理会话
@@ -153,7 +165,7 @@ func CompleteIamSsoLogin(sessionID, callbackUrl string) (accessToken, refreshTok
 	delete(sessions, sessionID)
 	sessionsMu.Unlock()
 
-	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, expiresIn, nil
+	return accessToken, refreshToken, session.ClientID, session.ClientSecret, session.Region, session.ReplacementAccountID, expiresIn, nil
 }
 
 func registerOIDCClient(oidcBase, startUrl, redirectUri string) (clientID, clientSecret string, err error) {
