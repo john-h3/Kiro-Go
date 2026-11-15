@@ -59,6 +59,7 @@ func AddApiKey(entry ApiKeyEntry) (ApiKeyEntry, error) {
 	if entry.CreatedAt == 0 {
 		entry.CreatedAt = time.Now().Unix()
 	}
+	entry.AllowedModels = normalizeAllowedModels(entry.AllowedModels)
 	cfg.ApiKeys = append(cfg.ApiKeys, entry)
 	if err := saveLocked(); err != nil {
 		// Roll back the in-memory append so we don't leave inconsistent state.
@@ -109,7 +110,49 @@ func UpdateApiKey(id string, patch ApiKeyEntry) error {
 	if patch.Migrated {
 		cfg.ApiKeys[idx].Migrated = true
 	}
+	if patch.AllowedModels != nil {
+		cfg.ApiKeys[idx].AllowedModels = normalizeAllowedModels(patch.AllowedModels)
+	}
 	return saveLocked()
+}
+
+// ApiKeyAllowsModel reports whether an API key is explicitly allowed to use a
+// client-facing model ID. Empty AllowedModels is deny-all by design.
+func ApiKeyAllowsModel(entry ApiKeyEntry, model string) bool {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return false
+	}
+	for _, allowed := range entry.AllowedModels {
+		if strings.EqualFold(strings.TrimSpace(allowed), model) {
+			return true
+		}
+	}
+	return false
+}
+
+func normalizeAllowedModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, model := range models {
+		model = strings.TrimSpace(model)
+		if model == "" {
+			continue
+		}
+		key := strings.ToLower(model)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, model)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // DeleteApiKey removes the API key entry with the given ID. Returns nil even if

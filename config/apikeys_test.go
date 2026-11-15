@@ -244,10 +244,10 @@ func TestResetApiKeyUsage(t *testing.T) {
 
 func TestApiKeyOverLimit(t *testing.T) {
 	tests := []struct {
-		name        string
-		entry       ApiKeyEntry
-		wantToken   bool
-		wantCredit  bool
+		name       string
+		entry      ApiKeyEntry
+		wantToken  bool
+		wantCredit bool
 	}{
 		{"unlimited", ApiKeyEntry{TokensUsed: 100, CreditsUsed: 5}, false, false},
 		{"under token limit", ApiKeyEntry{TokenLimit: 200, TokensUsed: 100}, false, false},
@@ -264,6 +264,37 @@ func TestApiKeyOverLimit(t *testing.T) {
 					tc.entry, gotT, gotC, tc.wantToken, tc.wantCredit)
 			}
 		})
+	}
+}
+
+func TestApiKeyModelWhitelistDefaultsToDenyAndPersists(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	created, err := AddApiKey(ApiKeyEntry{Name: "models", Key: "sk-models", Enabled: true})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	if ApiKeyAllowsModel(created, "claude-sonnet-4.5") {
+		t.Fatal("expected an empty whitelist to deny access")
+	}
+	if err := UpdateApiKey(created.ID, ApiKeyEntry{AllowedModels: []string{" claude-sonnet-4.5 ", "CLAUDE-SONNET-4.5"}}); err != nil {
+		t.Fatalf("update whitelist: %v", err)
+	}
+	got := GetApiKeyEntry(created.ID)
+	if got == nil || len(got.AllowedModels) != 1 || got.AllowedModels[0] != "claude-sonnet-4.5" {
+		t.Fatalf("expected normalized whitelist, got %+v", got)
+	}
+	if !ApiKeyAllowsModel(*got, "CLAUDE-SONNET-4.5") {
+		t.Fatal("expected model match to be case insensitive")
+	}
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	reloaded := GetApiKeyEntry(created.ID)
+	if reloaded == nil || len(reloaded.AllowedModels) != 1 {
+		t.Fatalf("expected whitelist to persist, got %+v", reloaded)
 	}
 }
 

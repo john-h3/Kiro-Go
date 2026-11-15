@@ -44,6 +44,9 @@ func (h *Handler) handleOpenAIResponses(w http.ResponseWriter, r *http.Request) 
 		req.Model = defaultResponsesModel
 	}
 	originalModel := req.Model
+	if !h.enforceOpenAIModelAccess(w, r, originalModel) {
+		return
+	}
 
 	storedInputCopy := append(json.RawMessage(nil), req.Input...)
 

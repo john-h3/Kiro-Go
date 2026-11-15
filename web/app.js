@@ -1946,6 +1946,7 @@
               '<span class="slider"></span>' +
             '</label>' +
             '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="edit" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionEdit')) + '</button>' +
+            '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="models" data-id="' + id + '"><i class="fa-solid fa-list-check"></i>' + escapeHtml(t('apiKeys.actionModels')) + '</button>' +
             '<button class="btn btn-outline btn-sm" type="button" data-apikey-action="reset" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionReset')) + '</button>' +
             '<button class="btn btn-danger btn-sm" type="button" data-apikey-action="delete" data-id="' + id + '">' + escapeHtml(t('apiKeys.actionDelete')) + '</button>' +
           '</div>' +
@@ -2116,6 +2117,7 @@
         const entry = apiKeysCache.find(x => x.id === id);
         const name = entry ? entry.name : '';
         if (action === 'edit') openApiKeyModal(entry);
+        else if (action === 'models') showApiKeyModels(entry);
         else if (action === 'delete') deleteApiKeyEntry(id, name);
         else if (action === 'reset') resetApiKeyUsageEntry(id, name);
       });
@@ -3536,12 +3538,14 @@
   async function showModelsView() {
     const title = $('apiViewTitle');
     const body = $('apiViewBody');
+    body.onclick = null;
+    body.onchange = null;
     title.textContent = t('api.viewModelsTitle');
     body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
     openDialog('apiViewModal');
 
     try {
-      const res = await fetch(baseUrl + '/v1/models');
+      const res = await api('/models');
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       const models = data.data || [];
@@ -3551,15 +3555,74 @@
     }
   }
 
-  function renderModelsView(container, models) {
+  async function showApiKeyModels(entry) {
+    if (!entry || !entry.id) return;
+    const title = $('apiViewTitle');
+    const body = $('apiViewBody');
+    body.onclick = null;
+    body.onchange = null;
+    title.textContent = t('apiKeys.modelsTitle');
+    body.innerHTML = '<div class="api-view-loading"><i class="fa-solid fa-spinner fa-spin"></i> ' + escapeHtml(t('api.loading')) + '</div>';
+    openDialog('apiViewModal');
+    try {
+      const res = await api('/models');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      const models = Array.isArray(data.data) ? data.data : [];
+      const selected = new Set(Array.isArray(entry.allowedModels) ? entry.allowedModels : []);
+      renderModelsView(body, models, { selectable: true, selected: selected });
+      body.onchange = e => {
+        const checkbox = e.target.closest('input[data-model-whitelist]');
+        if (!checkbox) return;
+        const model = checkbox.dataset.modelWhitelist;
+        if (checkbox.checked) selected.add(model);
+        else selected.delete(model);
+      };
+      body.onclick = async e => {
+        if (e.target.closest('[data-close-api-view]')) {
+          closeApiViewModal();
+          return;
+        }
+        const save = e.target.closest('#modelWhitelistSaveBtn');
+        if (!save) return;
+        save.disabled = true;
+        try {
+          const allowedModels = Array.from(selected);
+          const update = await api('/api-keys/' + encodeURIComponent(entry.id), {
+            method: 'PUT', body: JSON.stringify({ allowedModels })
+          });
+          const result = await update.json().catch(() => ({}));
+          if (!update.ok || result.success === false) throw new Error(result.error || t('common.saveFailed'));
+          const cached = apiKeysCache.find(x => x.id === entry.id);
+          if (cached) cached.allowedModels = allowedModels;
+          closeApiViewModal();
+          toast(t('apiKeys.modelsSaved'), 'success');
+          renderApiKeys();
+        } catch (e) {
+          save.disabled = false;
+          toast((e && e.message) || t('common.saveFailed'), 'error');
+        }
+      };
+    } catch (e) {
+      body.innerHTML = '<div class="api-view-error"><i class="fa-solid fa-circle-exclamation"></i> ' + escapeHtml(t('api.fetchError') + ': ' + e.message) + '</div>';
+    }
+  }
+
+  function renderModelsView(container, models, options) {
+    options = options || {};
+    const selected = options.selected || new Set();
     const thinkingSuffix = '-thinking';
     let html = '<div class="api-view-toolbar">';
     html += '<span class="api-view-count">' + escapeHtml(t('api.totalModels').replace('{count}', models.length)) + '</span>';
     html += '<input type="text" class="api-view-search" id="modelsSearchInput" placeholder="' + escapeAttr(t('api.searchModels')) + '" />';
     html += '</div>';
     html += '<div id="modelsGridContainer">';
-    html += buildModelsGroupedHtml(models, thinkingSuffix);
+    html += buildModelsGroupedHtml(models, thinkingSuffix, options);
     html += '</div>';
+    if (options.selectable) {
+      html += '<div class="modal-footer model-whitelist-footer"><button class="btn btn-secondary" type="button" data-close-api-view="1">' + escapeHtml(t('common.cancel')) + '</button>' +
+        '<button class="btn btn-primary" type="button" id="modelWhitelistSaveBtn">' + escapeHtml(t('apiKeys.modelsSave')) + '</button></div>';
+    }
     container.innerHTML = html;
 
     const searchInput = $('modelsSearchInput');
@@ -3567,7 +3630,7 @@
       searchInput.addEventListener('input', () => {
         const kw = searchInput.value.toLowerCase().trim();
         const filtered = kw ? models.filter(m => (m.id || '').toLowerCase().includes(kw) || (m.owned_by || '').toLowerCase().includes(kw)) : models;
-        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffix);
+        $('modelsGridContainer').innerHTML = buildModelsGroupedHtml(filtered, thinkingSuffix, options);
       });
     }
   }
@@ -3636,7 +3699,9 @@
     return colors[family] || '#6b7280';
   }
 
-  function buildModelsGroupedHtml(models, thinkingSuffix) {
+  function buildModelsGroupedHtml(models, thinkingSuffix, options) {
+    options = options || {};
+    const selected = options.selected || new Set();
     if (models.length === 0) {
       return '<div class="api-view-loading">' + escapeHtml(t('api.noModels')) + '</div>';
     }
@@ -3679,6 +3744,9 @@
         if (supportsImage) html += '<span class="model-badge model-badge--image"><i class="fa-solid fa-image"></i> vision</span>';
         html += '</div>';
         html += '</div>';
+        if (options.selectable) {
+          html += '<label class="switch model-whitelist-switch" title="' + escapeAttr(t('apiKeys.modelToggle')) + '"><input type="checkbox" data-model-whitelist="' + escapeAttr(id) + '"' + (selected.has(id) ? ' checked' : '') + ' /><span class="slider"></span></label>';
+        }
         html += '</div>';
       }
 
