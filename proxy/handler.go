@@ -3027,8 +3027,9 @@ func (h *Handler) apiBatchAccounts(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		StartUrl string `json:"startUrl"`
-		Region   string `json:"region"`
+		StartUrl         string `json:"startUrl"`
+		Region           string `json:"region"`
+		ReplaceAccountID string `json:"replaceAccountId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		w.WriteHeader(400)
@@ -3041,8 +3042,16 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"error": "startUrl is required"})
 		return
 	}
+	req.ReplaceAccountID = strings.TrimSpace(req.ReplaceAccountID)
+	if req.ReplaceAccountID != "" {
+		if _, err := uuid.Parse(req.ReplaceAccountID); err != nil || !config.AccountIDExists(req.ReplaceAccountID) {
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(map[string]string{"error": "replaceAccountId must reference an existing account"})
+			return
+		}
+	}
 
-	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region)
+	sessionID, authorizeUrl, expiresIn, err := auth.StartIamSsoLogin(req.StartUrl, req.Region, req.ReplaceAccountID)
 	if err != nil {
 		w.WriteHeader(500)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3053,6 +3062,7 @@ func (h *Handler) apiStartIamSso(w http.ResponseWriter, r *http.Request) {
 		"sessionId":    sessionID,
 		"authorizeUrl": authorizeUrl,
 		"expiresIn":    expiresIn,
+		"replacing":    req.ReplaceAccountID != "",
 	})
 }
 
@@ -3067,7 +3077,7 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	accessToken, refreshToken, clientID, clientSecret, region, expiresIn, err := auth.CompleteIamSsoLogin(req.SessionID, req.CallbackUrl)
+	accessToken, refreshToken, clientID, clientSecret, region, replacementAccountID, expiresIn, err := auth.CompleteIamSsoLoginWithTarget(req.SessionID, req.CallbackUrl)
 	if err != nil {
 		w.WriteHeader(400)
 		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
@@ -3076,10 +3086,20 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 
 	// 获取用户信息
 	email, _, _ := auth.GetUserInfo(accessToken)
+	if replacementAccountID != "" && !config.AccountIDExists(replacementAccountID) {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "replacement account no longer exists"})
+		return
+	}
+	if config.AccountCredentialExistsExcept(refreshToken, replacementAccountID) {
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]string{"error": config.ErrDuplicateRefreshToken.Error()})
+		return
+	}
 
 	// 创建账号
 	account := config.Account{
-		ID:           auth.GenerateAccountID(),
+		ID:           replacementAccountID,
 		Email:        email,
 		AccessToken:  accessToken,
 		RefreshToken: refreshToken,
@@ -3091,16 +3111,26 @@ func (h *Handler) apiCompleteIamSso(w http.ResponseWriter, r *http.Request) {
 		Enabled:      true,
 		MachineId:    config.GenerateMachineId(),
 	}
+	if account.ID == "" {
+		account.ID = auth.GenerateAccountID()
+	}
 
-	if err := config.AddAccount(account); err != nil {
+	var saveErr error
+	if replacementAccountID != "" {
+		saveErr = config.ReplaceAccountCredentials(replacementAccountID, account)
+	} else {
+		saveErr = config.AddAccount(account)
+	}
+	if saveErr != nil {
 		w.WriteHeader(500)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": saveErr.Error()})
 		return
 	}
 
 	h.pool.Reload()
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"success": true,
+		"success":  true,
+		"replaced": replacementAccountID != "",
 		"account": map[string]interface{}{
 			"id":    account.ID,
 			"email": account.Email,

@@ -618,6 +618,13 @@ func NormalizeAPIKeyAccount(account *Account) error {
 // AccountCredentialExists checks both the current refresh token and the
 // original credential fingerprint while holding the configuration read lock.
 func AccountCredentialExists(refreshToken string) bool {
+	return AccountCredentialExistsExcept(refreshToken, "")
+}
+
+// AccountCredentialExistsExcept is like AccountCredentialExists but ignores
+// one account ID. This lets an existing account rotate its credential without
+// treating its replacement import as a duplicate of itself.
+func AccountCredentialExistsExcept(refreshToken, excludeID string) bool {
 	if refreshToken == "" {
 		return false
 	}
@@ -625,6 +632,9 @@ func AccountCredentialExists(refreshToken string) bool {
 	cfgLock.RLock()
 	defer cfgLock.RUnlock()
 	for _, account := range cfg.Accounts {
+		if excludeID != "" && account.ID == excludeID {
+			continue
+		}
 		if account.RefreshToken == refreshToken ||
 			(fingerprint != "" && account.RefreshTokenFingerprint == fingerprint) {
 			return true
@@ -940,6 +950,54 @@ func UpdateAccountCredentialState(
 			}
 			return nil
 		}
+	}
+	return ErrAccountNotFound
+}
+
+// ReplaceAccountCredentials updates the authentication fields of an existing
+// account while preserving its ID, usage counters, subscription data, model
+// permissions, and other operator-managed state. It is used when an operator
+// re-authenticates an existing account with a newly issued credential.
+func ReplaceAccountCredentials(id string, replacement Account) error {
+	cfgLock.Lock()
+	defer cfgLock.Unlock()
+	for i, account := range cfg.Accounts {
+		if account.ID != id {
+			continue
+		}
+		previous := cfg.Accounts[i]
+		if replacement.Email != "" {
+			account.Email = replacement.Email
+		}
+		if replacement.UserId != "" {
+			account.UserId = replacement.UserId
+		}
+		account.AccessToken = replacement.AccessToken
+		account.RefreshToken = replacement.RefreshToken
+		if replacement.RefreshTokenFingerprint != "" {
+			account.RefreshTokenFingerprint = replacement.RefreshTokenFingerprint
+		} else {
+			account.RefreshTokenFingerprint = RefreshTokenFingerprint(replacement.RefreshToken)
+		}
+		account.KiroApiKey = replacement.KiroApiKey
+		account.ClientID = replacement.ClientID
+		account.ClientSecret = replacement.ClientSecret
+		account.AuthMethod = replacement.AuthMethod
+		account.Provider = replacement.Provider
+		account.Region = replacement.Region
+		account.ExpiresAt = replacement.ExpiresAt
+		account.TokenEndpoint = replacement.TokenEndpoint
+		account.IssuerURL = replacement.IssuerURL
+		account.Scopes = replacement.Scopes
+		if !account.ProfileArnPinned {
+			account.ProfileArn = replacement.ProfileArn
+		}
+		cfg.Accounts[i] = account
+		if err := Save(); err != nil {
+			cfg.Accounts[i] = previous
+			return err
+		}
+		return nil
 	}
 	return ErrAccountNotFound
 }

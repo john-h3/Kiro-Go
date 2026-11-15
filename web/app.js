@@ -25,6 +25,7 @@
   let builderIdSession = '';
   let builderIdPollTimer = null;
   let iamSession = '';
+  let iamReplaceAccountId = '';
   let microsoftSession = '';
   let microsoftSelectionId = '';
   let microsoftStage = 'kiro';
@@ -1237,7 +1238,9 @@
     if (!a) return;
     const idAttr = escapeAttr(id);
     $('detailBody').innerHTML =
-      '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) + '</h4><div class="detail-grid">' +
+      '<div class="detail-section"><h4>' + escapeHtml(t('detail.basicInfo')) +
+      ' <button class="btn btn-sm btn-outline" data-detail-action="reauthIam" data-id="' + idAttr + '" type="button">' + escapeHtml(t('detail.reauthIam')) + '</button>' +
+      '</h4><div class="detail-grid">' +
       detailItem(t('detail.email'), getDisplayEmail(a.email, null)) +
       detailItem(t('detail.userId'), a.userId || '-') +
       detailItem(t('detail.authMethod'), formatAuthMethod(a.provider || a.authMethod)) +
@@ -1463,6 +1466,10 @@
     } catch (e) {
       toast(t('detail.saveFailed'), 'error');
     }
+  }
+  function startIamReauth(id) {
+    closeDialog('detailModal');
+    showModal('iam', { replaceAccountId: id });
   }
   function renderOverageBlock(a, idAttr) {
     const status = (a.overageStatus || '').toUpperCase();
@@ -2231,10 +2238,14 @@
       '<span class="method-arrow" aria-hidden="true"><i class="fa-solid fa-chevron-right"></i></span>' +
       '</button>';
   }
-  function showModal(type) {
+  function showModal(type, options) {
     const modal = $('addModal');
     const title = $('modalTitle');
     const body = $('modalBody');
+    if (type === 'add') iamReplaceAccountId = '';
+    if (type === 'iam' && options && Object.prototype.hasOwnProperty.call(options, 'replaceAccountId')) {
+      iamReplaceAccountId = options.replaceAccountId || '';
+    }
     if (type === 'add') modalAdd(title, body);
     else if (type === 'builderid') modalBuilderId(title, body);
     else if (type === 'iam') modalIam(title, body);
@@ -2251,6 +2262,7 @@
     closeDialog('addModal');
     resetMicrosoftFlow(true);
     iamSession = '';
+    iamReplaceAccountId = '';
     if (builderIdPollTimer) { clearTimeout(builderIdPollTimer); builderIdPollTimer = null; }
     builderIdSession = '';
   }
@@ -2295,9 +2307,10 @@
     $('startBuilderIdBtn').addEventListener('click', startBuilderIdLogin);
   }
   function modalIam(title, body) {
-    title.textContent = t('modal.iamTitle');
+    const replacing = !!iamReplaceAccountId;
+    title.textContent = replacing ? t('iam.replaceTitle') : t('modal.iamTitle');
     body.innerHTML =
-      '<p class="help-block">' + escapeHtml(t('modal.iamDesc')) + '</p>' +
+      '<p class="help-block">' + escapeHtml(replacing ? t('iam.replaceDesc') : t('modal.iamDesc')) + '</p>' +
       '<div class="form-group"><label>' + escapeHtml(t('iam.startUrl')) + '</label><input type="text" id="iamStartUrl" placeholder="https://xxx.awsapps.com/start" /></div>' +
       '<div class="form-group"><label>' + escapeHtml(t('detail.region')) + '</label><input type="text" id="iamRegion" value="us-east-1" /></div>' +
       '<div id="iamStep2" class="hidden">' +
@@ -2837,13 +2850,14 @@
       const d = await res.json();
       if (d.success) {
         closeModal(); loadAccounts(); loadStats();
-        toastPrimary(t('builderid.success') + ': ' + (d.account?.email || d.account?.id));
-        autoRefreshNewAccount(d.account?.id);
+        toastPrimary((d.replaced ? t('iam.replaceSuccess') : t('builderid.success')) + ': ' + (d.account?.email || d.account?.id));
+        if (!d.replaced) autoRefreshNewAccount(d.account?.id);
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     } else {
       const res = await api('/auth/iam-sso/start', {
         method: 'POST', body: JSON.stringify({
-          startUrl: $('iamStartUrl').value, region: $('iamRegion').value
+          startUrl: $('iamStartUrl').value, region: $('iamRegion').value,
+          replaceAccountId: iamReplaceAccountId || undefined
         })
       });
       const d = await res.json();
@@ -3497,6 +3511,7 @@
       else if (a === 'refreshModels') refreshAccountModels(id);
       else if (a === 'loadRegions') loadRegions(id);
       else if (a === 'resetRegion') resetRegion(id);
+      else if (a === 'reauthIam') startIamReauth(id);
     });
   }
 

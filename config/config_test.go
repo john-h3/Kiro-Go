@@ -345,6 +345,61 @@ func TestUpdateAccountCredentialStateAppliesProfileArnWhenNotPinned(t *testing.T
 	}
 }
 
+func TestReplaceAccountCredentialsPreservesAccountUsage(t *testing.T) {
+	cfgFile := filepath.Join(t.TempDir(), "config.json")
+	if err := Init(cfgFile); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	account := Account{
+		ID:           "reauth-account",
+		Email:        "old@example.com",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		AuthMethod:   "idc",
+		Region:       "us-east-1",
+		Enabled:      true,
+		RequestCount: 12,
+		TotalTokens:  345,
+		TotalCredits: 6.5,
+		UsageCurrent: 42,
+		ProfileArn:   "arn:aws:codewhisperer:us-east-1:123456789012:profile/old",
+	}
+	if err := AddAccount(account); err != nil {
+		t.Fatalf("add account: %v", err)
+	}
+	replacement := Account{
+		ID:                      account.ID,
+		Email:                   "new@example.com",
+		UserId:                  "new-user",
+		AccessToken:             "new-access",
+		RefreshToken:            "new-refresh",
+		RefreshTokenFingerprint: RefreshTokenFingerprint("new-refresh-source"),
+		ClientID:                "new-client",
+		ClientSecret:            "new-secret",
+		AuthMethod:              "idc",
+		Region:                  "eu-central-1",
+		ExpiresAt:               12345,
+		ProfileArn:              "arn:aws:codewhisperer:eu-central-1:123456789012:profile/new",
+	}
+	if err := ReplaceAccountCredentials(account.ID, replacement); err != nil {
+		t.Fatalf("replace credentials: %v", err)
+	}
+	got := GetAccounts()
+	if len(got) != 1 {
+		t.Fatalf("expected one account, got %d", len(got))
+	}
+	updated := got[0]
+	if updated.AccessToken != "new-access" || updated.RefreshToken != "new-refresh" || updated.ClientID != "new-client" || updated.Region != "eu-central-1" {
+		t.Fatalf("credential fields were not replaced: %+v", updated)
+	}
+	if updated.RequestCount != account.RequestCount || updated.TotalTokens != account.TotalTokens || updated.TotalCredits != account.TotalCredits || updated.UsageCurrent != account.UsageCurrent {
+		t.Fatalf("usage fields changed during reauth: %+v", updated)
+	}
+	if updated.ProfileArn != replacement.ProfileArn {
+		t.Fatalf("profile ARN was not replaced: %q", updated.ProfileArn)
+	}
+}
+
 func TestUpdateAccountProfileArnDoesNotOverwritePin(t *testing.T) {
 	if err := Init(filepath.Join(t.TempDir(), "config.json")); err != nil {
 		t.Fatalf("init config: %v", err)
