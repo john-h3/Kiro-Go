@@ -59,10 +59,14 @@
     const isPromise = input && typeof input.then === 'function';
     if (isPromise && typeof ClipboardItem !== 'undefined' && navigator.clipboard && navigator.clipboard.write) {
       const blobPromise = Promise.resolve(input).then(t => new Blob([String(t == null ? '' : t)], { type: 'text/plain' }));
-      await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPromise })]);
-      return;
+      try {
+        await navigator.clipboard.write([new ClipboardItem({ 'text/plain': blobPromise })]);
+        return;
+      } catch (e) {
+        input = await input;
+      }
     }
-    const text = isPromise ? await input : input;
+    const text = input && typeof input.then === 'function' ? await input : input;
     const str = String(text == null ? '' : text);
     if (navigator.clipboard && navigator.clipboard.writeText) {
       try {
@@ -75,15 +79,14 @@
     ta.readOnly = true;
     ta.className = 'clipboard-proxy';
     document.body.appendChild(ta);
-    const range = document.createRange();
-    range.selectNodeContents(ta);
-    const sel = window.getSelection();
-    sel.removeAllRanges();
-    sel.addRange(range);
-    ta.setSelectionRange(0, str.length);
-    document.execCommand('copy');
-    sel.removeAllRanges();
-    document.body.removeChild(ta);
+    try {
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, str.length);
+      if (!document.execCommand('copy')) throw new Error('Clipboard copy is not available');
+    } finally {
+      document.body.removeChild(ta);
+    }
   }
   function renderEndpointCode(id, value) {
     const el = $(id);
@@ -2239,8 +2242,12 @@
         if (opened) opened.opener = null;
       });
       $('microsoftCopyBtn').addEventListener('click', async () => {
-        await copyText(microsoftAuthorizeUrl);
-        toast(t('common.copied'), 'primary');
+        try {
+          await copyText(microsoftAuthorizeUrl);
+          toast(t('common.copied'), 'primary');
+        } catch (e) {
+          toast(t('common.failed'), 'error');
+        }
       });
     }
     $('microsoftBtn').addEventListener('click', hasAuthorizeUrl ? completeMicrosoftLogin : startMicrosoftLogin);
@@ -2643,8 +2650,12 @@
       $('builderIdStep2').classList.remove('hidden');
       $('builderIdOpenBtn').addEventListener('click', () => window.open($('builderIdVerifyUrl').textContent, '_blank'));
       $('builderIdCopyBtn').addEventListener('click', async () => {
-        await copyText($('builderIdVerifyUrl').textContent);
-        toast(t('common.copied'), 'primary');
+        try {
+          await copyText($('builderIdVerifyUrl').textContent);
+          toast(t('common.copied'), 'primary');
+        } catch (e) {
+          toast(t('common.failed'), 'error');
+        }
       });
       $('builderIdCancelBtn').addEventListener('click', cancelBuilderIdLogin);
       pollBuilderIdAuth(d.interval || 5);
@@ -2699,8 +2710,12 @@
         $('iamBtn').textContent = t('iam.complete');
         $('iamOpenBtn').addEventListener('click', () => window.open($('iamAuthUrl').textContent, '_blank'));
         $('iamCopyBtn').addEventListener('click', async () => {
-          await copyText($('iamAuthUrl').textContent);
-          toast(t('common.copied'), 'primary');
+          try {
+            await copyText($('iamAuthUrl').textContent);
+            toast(t('common.copied'), 'primary');
+          } catch (e) {
+            toast(t('common.failed'), 'error');
+          }
         });
       } else toastError(t('common.failed') + ': ' + (d.error || ''));
     }
